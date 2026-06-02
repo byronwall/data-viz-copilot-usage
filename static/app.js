@@ -354,6 +354,8 @@ function wireSelect(svgEl, rightEl) {
 }
 
 // ---------- Modal ----------
+let MODAL_SID = null;
+
 async function openModal(sid, maxTok) {
   const modal = document.getElementById("modal");
   const chartHolder = document.getElementById("modalChart");
@@ -361,6 +363,8 @@ async function openModal(sid, maxTok) {
   chartHolder.innerHTML = `<div class="muted" style="padding:20px">loading…</div>`;
   right.innerHTML = "";
   modal.classList.add("open");
+  MODAL_SID = sid;
+  syncUrl(true); // push so Back closes the modal
 
   let payload;
   try {
@@ -390,7 +394,10 @@ async function openModal(sid, maxTok) {
   wireSelect(chartHolder.querySelector("svg"), right);
 }
 
-function closeModal() { document.getElementById("modal").classList.remove("open"); }
+function closeModal() {
+  document.getElementById("modal").classList.remove("open");
+  if (MODAL_SID) { MODAL_SID = null; syncUrl(true); }
+}
 document.getElementById("closeBtn").addEventListener("click", closeModal);
 document.getElementById("modal").addEventListener("click", e => { if (e.target.id === "modal") closeModal(); });
 document.addEventListener("keydown", e => { if (e.key === "Escape") { closeModal(); closeCal(); } });
@@ -468,11 +475,72 @@ document.getElementById("nextBtn").addEventListener("click", () => { RANGE_PINNE
 startEl.addEventListener("change", () => { RANGE_PINNED = false; updateRangeInfo(); updateQuickActive(); loadSessions(); });
 endEl.addEventListener("change", () => { RANGE_PINNED = false; updateRangeInfo(); updateQuickActive(); loadSessions(); });
 
-// Initial: last 24h
-(function init() {
-  const now = Math.floor(Date.now() / 1000);
-  setRangeTs(now - 24 * 3600, now);
-})();
+// ---------- URL state ----------
+// Every control + open overlays serialize into query params so a refresh (or a
+// shared link) restores the exact view. Pinned "last N hours" windows persist as
+// hours=N (re-anchored to now on load); explicit windows persist as start/end
+// unix timestamps. Params at their defaults are omitted to keep URLs clean.
+const URL_DEFAULTS = { hours: 24, sort: "total_input", limit: "50", min_tokens: "0" };
+let SUPPRESS_URL = false; // true while restoring state FROM the URL
+
+function syncUrl(push = false) {
+  if (SUPPRESS_URL) return;
+  const p = new URLSearchParams();
+  const [s, e] = getRangeTs();
+  if (RANGE_PINNED && s && e) {
+    const hours = (e - s) / 3600;
+    if (Math.abs(hours - URL_DEFAULTS.hours) > 0.01) p.set("hours", String(+hours.toFixed(2)));
+  } else if (s && e) {
+    p.set("start", String(s));
+    p.set("end", String(e));
+  }
+  const sort = document.getElementById("sort").value;
+  if (sort !== URL_DEFAULTS.sort) p.set("sort", sort);
+  const limit = document.getElementById("limit").value;
+  if (limit !== URL_DEFAULTS.limit) p.set("limit", limit);
+  const minTok = document.getElementById("min_tokens").value;
+  if (minTok !== URL_DEFAULTS.min_tokens) p.set("min_tokens", minTok);
+  if (CAL_SELECTED) p.set("day", CAL_SELECTED);
+  if (!calPop.hidden) { p.set("cal", "1"); p.set("cal_year", String(CAL_YEAR)); }
+  if (MODAL_SID) p.set("session", MODAL_SID);
+  const qs = p.toString();
+  const url = qs ? `${location.pathname}?${qs}` : location.pathname;
+  if (url === location.pathname + location.search) return;
+  if (push) history.pushState(null, "", url);
+  else history.replaceState(null, "", url);
+}
+
+function applyUrlState() {
+  const p = new URLSearchParams(location.search);
+  SUPPRESS_URL = true;
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const start = Number(p.get("start")), end = Number(p.get("end"));
+    if (start && end && end > start) {
+      RANGE_PINNED = false;
+      setRangeTs(start, end);
+    } else {
+      const hours = Number(p.get("hours")) || URL_DEFAULTS.hours;
+      RANGE_PINNED = true;
+      setRangeTs(now - hours * 3600, now); // bumpless: pinned windows re-anchor to now
+    }
+    document.getElementById("sort").value = p.get("sort") || URL_DEFAULTS.sort;
+    document.getElementById("limit").value = p.get("limit") || URL_DEFAULTS.limit;
+    document.getElementById("min_tokens").value = p.get("min_tokens") || URL_DEFAULTS.min_tokens;
+    CAL_SELECTED = p.get("day") || null;
+    const calYear = Number(p.get("cal_year"));
+    if (calYear) CAL_YEAR = calYear;
+    if (p.get("cal") === "1") openCal(); else closeCal();
+    const sid = p.get("session");
+    if (sid && sid !== MODAL_SID) openModal(sid);
+    else if (!sid && MODAL_SID) closeModal();
+  } finally {
+    SUPPRESS_URL = false;
+  }
+  loadSessions();
+}
+
+window.addEventListener("popstate", applyUrlState);
 
 // ---------- Daily AIC calendar ----------
 // Year heatmap of total AIC per local day, fed by /api/daily_aic (disk-cached server side).
@@ -579,10 +647,13 @@ function openCal() {
   calTrigger.classList.add("active");
   if (!_calLoaded) { _calLoaded = true; loadCalendar(); }
   else renderCalendar(); // re-measure width / refresh selection
+  syncUrl();
 }
 function closeCal() {
+  const wasOpen = !calPop.hidden;
   calPop.hidden = true;
   calTrigger.classList.remove("active");
+  if (wasOpen) syncUrl();
 }
 calTrigger.addEventListener("click", () => (calPop.hidden ? openCal() : closeCal()));
 document.addEventListener("click", e => {
@@ -601,8 +672,8 @@ document.getElementById("calendar").addEventListener("click", e => {
   setRangeTs(start, start + 86400);
   loadSessions();
 });
-document.getElementById("calPrevYear").addEventListener("click", () => { CAL_YEAR--; renderCalendar(); });
-document.getElementById("calNextYear").addEventListener("click", () => { CAL_YEAR++; renderCalendar(); });
+document.getElementById("calPrevYear").addEventListener("click", () => { CAL_YEAR--; renderCalendar(); syncUrl(); });
+document.getElementById("calNextYear").addEventListener("click", () => { CAL_YEAR++; renderCalendar(); syncUrl(); });
 
 let _calResizeT = null;
 window.addEventListener("resize", () => {
@@ -631,6 +702,7 @@ async function loadSessions() {
   });
   if (s) opts.set("start_ts", String(s));
   if (e) opts.set("end_ts", String(e));
+  syncUrl();
 
   const grid = document.getElementById("grid");
   const empty = document.getElementById("empty");
@@ -678,4 +750,11 @@ document.getElementById("controls").addEventListener("submit", e => {
   loadSessions();
 });
 
-loadSessions();
+// Changing sort/limit/min_tokens reloads immediately so the URL always reflects
+// what's on screen (the Refresh button remains the "re-anchor to now" action).
+["sort", "limit", "min_tokens"].forEach(id => {
+  document.getElementById(id).addEventListener("change", () => loadSessions());
+});
+
+// Initial load: restore the full view (range, controls, calendar, open modal) from the URL.
+applyUrlState();

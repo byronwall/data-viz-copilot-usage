@@ -4,8 +4,8 @@
     {
       "name": "copilot-usage",
       "runtimeExecutable": "uv",
-      "runtimeArgs": ["run", "app.py"],
-      "port": 5057
+      "runtimeArgs": ["run", "app.py", "--port", "5058"],
+      "port": 5058
     }
   ]
 }
