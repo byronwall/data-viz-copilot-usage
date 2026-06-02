@@ -88,6 +88,7 @@ def api_session(sid):
             s = analyzer.assemble_session(fp)
             if s:
                 analyzer.link_search_parents([s])
+                analyzer.absorb_search_children(s)
                 return jsonify(analyzer.session_detail(s))
     abort(404)
 

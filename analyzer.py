@@ -662,17 +662,25 @@ def query_sessions(
     # Absorb each parent's search-children into its totals so the parent's headline numbers
     # reflect what the user truly spent (including subagent searches it spawned).
     for parent in top:
-        for csid, cpath in parent.search_child_paths.items():
-            child = assemble_session(cpath)
-            if not child:
-                continue
-            parent.total_input += child.total_input
-            parent.total_cached += child.total_cached
-            parent.total_output += child.total_output
-            parent.total_aic += child.total_aic
-            parent.n_requests += child.n_requests
-            parent.n_compactions += child.n_compactions
+        absorb_search_children(parent)
     return top
+
+
+def absorb_search_children(parent: Session) -> None:
+    """Fold each linked search-child's totals into the parent's headline numbers.
+
+    Requires link_search_parents() to have populated parent.search_child_paths first.
+    """
+    for csid, cpath in parent.search_child_paths.items():
+        child = assemble_session(cpath)
+        if not child:
+            continue
+        parent.total_input += child.total_input
+        parent.total_cached += child.total_cached
+        parent.total_output += child.total_output
+        parent.total_aic += child.total_aic
+        parent.n_requests += child.n_requests
+        parent.n_compactions += child.n_compactions
 
 
 def session_summary(s: Session) -> dict:
