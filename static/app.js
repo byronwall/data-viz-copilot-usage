@@ -400,6 +400,12 @@ const startEl = document.getElementById("start_date");
 const endEl = document.getElementById("end_date");
 const rangeInfoEl = document.getElementById("rangeInfo");
 
+// True while the window means "the last N hours up to now" (initial load and the
+// quick buttons). Refresh then re-anchors the window to now so sessions written
+// since the last load are included. Manually edited dates, calendar day picks,
+// and ◀/▶ stepping express a fixed historical window, which unpins.
+let RANGE_PINNED = true;
+
 // datetime-local needs "YYYY-MM-DDTHH:mm" in LOCAL time (no TZ suffix)
 function tsToLocalInput(ts) {
   const d = new Date(ts * 1000);
@@ -452,14 +458,15 @@ document.querySelectorAll("button.quick").forEach(b => {
   b.addEventListener("click", () => {
     const h = Number(b.dataset.hours);
     const now = Math.floor(Date.now() / 1000);
+    RANGE_PINNED = true;
     setRangeTs(now - h * 3600, now);
     loadSessions();
   });
 });
-document.getElementById("prevBtn").addEventListener("click", () => { shiftRange(-1); loadSessions(); });
-document.getElementById("nextBtn").addEventListener("click", () => { shiftRange(+1); loadSessions(); });
-startEl.addEventListener("change", () => { updateRangeInfo(); updateQuickActive(); loadSessions(); });
-endEl.addEventListener("change", () => { updateRangeInfo(); updateQuickActive(); loadSessions(); });
+document.getElementById("prevBtn").addEventListener("click", () => { RANGE_PINNED = false; shiftRange(-1); loadSessions(); });
+document.getElementById("nextBtn").addEventListener("click", () => { RANGE_PINNED = false; shiftRange(+1); loadSessions(); });
+startEl.addEventListener("change", () => { RANGE_PINNED = false; updateRangeInfo(); updateQuickActive(); loadSessions(); });
+endEl.addEventListener("change", () => { RANGE_PINNED = false; updateRangeInfo(); updateQuickActive(); loadSessions(); });
 
 // Initial: last 24h
 (function init() {
@@ -590,6 +597,7 @@ document.getElementById("calendar").addEventListener("click", e => {
   const start = Math.floor(new Date(yy, mm - 1, dd).getTime() / 1000);
   CAL_SELECTED = key;
   closeCal();
+  RANGE_PINNED = false;
   setRangeTs(start, start + 86400);
   loadSessions();
 });
@@ -658,6 +666,15 @@ async function loadSessions() {
 
 document.getElementById("controls").addEventListener("submit", e => {
   e.preventDefault();
+  // Refresh means "show everything on disk right now": re-anchor a pinned
+  // ("last N hours") window to now so sessions written since the last load are
+  // included. NB: sessions are matched by file mtime, so a window whose end has
+  // drifted into the past silently drops still-active sessions.
+  const [s, en] = getRangeTs();
+  if (RANGE_PINNED && s && en) {
+    const now = Math.floor(Date.now() / 1000);
+    setRangeTs(s + (now - en), now);
+  }
   loadSessions();
 });
 
