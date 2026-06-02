@@ -393,7 +393,7 @@ async function openModal(sid, maxTok) {
 function closeModal() { document.getElementById("modal").classList.remove("open"); }
 document.getElementById("closeBtn").addEventListener("click", closeModal);
 document.getElementById("modal").addEventListener("click", e => { if (e.target.id === "modal") closeModal(); });
-document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") { closeModal(); closeCal(); } });
 
 // ---------- Date range controls ----------
 const startEl = document.getElementById("start_date");
@@ -467,11 +467,155 @@ endEl.addEventListener("change", () => { updateRangeInfo(); updateQuickActive();
   setRangeTs(now - 24 * 3600, now);
 })();
 
+// ---------- Daily AIC calendar ----------
+// Year heatmap of total AIC per local day, fed by /api/daily_aic (disk-cached server side).
+// Wide: one row per month (31 day columns). Narrow: classic 7-day week grids per month.
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+let CAL_DAYS = {};                       // "YYYY-MM-DD" -> aic
+let CAL_YEAR = new Date().getFullYear();
+let CAL_SELECTED = null;                 // "YYYY-MM-DD" of the day currently filtered
+
+function calKey(y, m, d) { return `${y}-${pad(m + 1)}-${pad(d)}`; }
+
+// Cells always use N.nk so small days don't render with more digits than big ones.
+function fmtAicCell(v) { return (v / 1000).toFixed(1) + "k"; }
+
+// GitHub-contribution-style green ramp; intensity ∝ sqrt(v/max) so mid days stay visible.
+function calHeat(v, max) {
+  if (!v || max <= 0) return { bg: "var(--row)", fg: "#8b949e" };
+  const t = Math.sqrt(Math.min(1, v / max));
+  const ramp = ["#0e4429", "#006d32", "#26a641", "#39d353"];
+  const i = Math.min(ramp.length - 1, Math.floor(t * ramp.length));
+  return { bg: ramp[i], fg: i >= 2 ? "#04260f" : "#e6f4ea" };
+}
+
+function calCell(y, m, d, max, today) {
+  const key = calKey(y, m, d);
+  const v = CAL_DAYS[key] || 0;
+  const { bg, fg } = calHeat(v, max);
+  const cls = ["cal-cell"];
+  if (key === today) cls.push("today");
+  if (key === CAL_SELECTED) cls.push("selected");
+  // zero-AIC days are inert: no data-date (click delegation skips), no hover affordance
+  if (!v) {
+    return `<div class="${cls.join(" ")}" style="background:${bg}"><span class="d">${d}</span></div>`;
+  }
+  const title = `${MONTH_NAMES[m]} ${d}, ${y} · ${fmtAic(v)} AIC`;
+  return `<div class="${cls.join(" ")}" data-date="${key}" title="${title}" style="background:${bg}">` +
+    `<span class="d">${d}</span>` +
+    `<span class="v" style="color:${fg}">${fmtAicCell(v)}</span>` +
+    `</div>`;
+}
+
+function renderCalendar() {
+  const el = document.getElementById("calendar");
+  const y = CAL_YEAR;
+  const today = calKey(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
+  let max = 0, yearTotal = 0;
+  for (const [k, v] of Object.entries(CAL_DAYS)) {
+    if (!k.startsWith(`${y}-`)) continue;
+    yearTotal += v;
+    if (v > max) max = v;
+  }
+  document.getElementById("calYear").textContent = String(y);
+  document.getElementById("calInfo").textContent = yearTotal ? `· ${fmtAic(yearTotal)} AIC this year` : "· no AIC this year";
+
+  // month-per-row needs ~26px × 31 cells + label; below that fall back to 7-day weeks
+  const wide = el.clientWidth >= 860;
+  let html = "";
+  if (wide) {
+    html += `<div class="cal-months">`;
+    for (let m = 0; m < 12; m++) {
+      const nDays = new Date(y, m + 1, 0).getDate();
+      html += `<div class="cal-mlabel">${MONTH_NAMES[m]}</div>`;
+      for (let d = 1; d <= 31; d++) {
+        html += d <= nDays ? calCell(y, m, d, max, today) : `<div class="cal-cell blank"></div>`;
+      }
+    }
+    html += `</div>`;
+  } else {
+    html += `<div class="cal-weeks">`;
+    for (let m = 0; m < 12; m++) {
+      const nDays = new Date(y, m + 1, 0).getDate();
+      const offset = new Date(y, m, 1).getDay(); // 0 = Sunday
+      html += `<div class="cal-month-block"><div class="cal-mlabel">${MONTH_NAMES[m]}</div><div class="cal-week-grid">`;
+      for (let i = 0; i < offset; i++) html += `<div class="cal-cell blank"></div>`;
+      for (let d = 1; d <= nDays; d++) html += calCell(y, m, d, max, today);
+      html += `</div></div>`;
+    }
+    html += `</div>`;
+  }
+  el.innerHTML = html;
+}
+
+async function loadCalendar() {
+  try {
+    const resp = await fetch("/api/daily_aic");
+    const data = await resp.json();
+    CAL_DAYS = data.days || {};
+    // default to the most recent year that has data (usually current year)
+    const years = Object.keys(CAL_DAYS).map(k => Number(k.slice(0, 4)));
+    if (years.length && !years.includes(CAL_YEAR)) CAL_YEAR = Math.max(...years);
+    renderCalendar();
+  } catch (e) {
+    document.getElementById("calendar").innerHTML = `<div class="muted" style="padding:8px">failed to load daily AIC</div>`;
+  }
+}
+
+// Popover plumbing — the calendar acts as an advanced date picker off the controls bar.
+const calPop = document.getElementById("calPop");
+const calTrigger = document.getElementById("calTrigger");
+let _calLoaded = false;
+
+function openCal() {
+  calPop.hidden = false;
+  calTrigger.classList.add("active");
+  if (!_calLoaded) { _calLoaded = true; loadCalendar(); }
+  else renderCalendar(); // re-measure width / refresh selection
+}
+function closeCal() {
+  calPop.hidden = true;
+  calTrigger.classList.remove("active");
+}
+calTrigger.addEventListener("click", () => (calPop.hidden ? openCal() : closeCal()));
+document.addEventListener("click", e => {
+  if (!calPop.hidden && !calPop.contains(e.target) && e.target !== calTrigger) closeCal();
+});
+
+document.getElementById("calendar").addEventListener("click", e => {
+  const cell = e.target.closest(".cal-cell[data-date]");
+  if (!cell) return;
+  const key = cell.dataset.date;
+  const [yy, mm, dd] = key.split("-").map(Number);
+  const start = Math.floor(new Date(yy, mm - 1, dd).getTime() / 1000);
+  CAL_SELECTED = key;
+  closeCal();
+  setRangeTs(start, start + 86400);
+  loadSessions();
+});
+document.getElementById("calPrevYear").addEventListener("click", () => { CAL_YEAR--; renderCalendar(); });
+document.getElementById("calNextYear").addEventListener("click", () => { CAL_YEAR++; renderCalendar(); });
+
+let _calResizeT = null;
+window.addEventListener("resize", () => {
+  clearTimeout(_calResizeT);
+  _calResizeT = setTimeout(() => { if (!calPop.hidden) renderCalendar(); }, 150);
+});
+
 // ---------- Main load ----------
 let CURRENT_MAX_TOK = 0;
 
 async function loadSessions() {
   const [s, e] = getRangeTs();
+  // drop the calendar highlight if the range no longer matches the selected day
+  if (CAL_SELECTED) {
+    const [yy, mm, dd] = CAL_SELECTED.split("-").map(Number);
+    const dayStart = Math.floor(new Date(yy, mm - 1, dd).getTime() / 1000);
+    if (s !== dayStart || e !== dayStart + 86400) {
+      CAL_SELECTED = null;
+      renderCalendar();
+    }
+  }
   const opts = new URLSearchParams({
     sort: document.getElementById("sort").value,
     limit: document.getElementById("limit").value,

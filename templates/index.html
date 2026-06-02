@@ -14,6 +14,7 @@
     <span class="sep muted">→</span>
     <input type="datetime-local" id="end_date" title="End">
     <button type="button" id="nextBtn" title="Step forward by current range">▶</button>
+    <button type="button" id="calTrigger" title="AIC calendar — pick a day">📅 AIC</button>
     <span class="muted small" id="rangeInfo"></span>
     <span class="vsep"></span>
     <div class="quick-group">
@@ -47,6 +48,16 @@
     <span><span class="dot" style="background:#d29922"></span>med cache</span>
     <span><span class="dot" style="background:#f85149"></span>cold cache</span>
     <span class="muted">click a chart to expand</span>
+  </div>
+  <div class="cal-pop" id="calPop" hidden>
+    <div class="cal-head">
+      <button type="button" id="calPrevYear" title="Previous year">◀</button>
+      <span id="calYear" class="cal-year"></span>
+      <button type="button" id="calNextYear" title="Next year">▶</button>
+      <span class="muted small" id="calInfo"></span>
+      <span class="muted small cal-hint">click a day to filter</span>
+    </div>
+    <div id="calendar"></div>
   </div>
 </header>
 

@@ -43,6 +43,33 @@ h1 { font-weight: 600; margin: 0 0 8px; font-size: 18px; }
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
 .dia { display: inline-block; width: 9px; height: 9px; background: var(--orange); transform: rotate(45deg); }
 
+/* Daily AIC calendar (popover off the date controls) */
+header { position: relative; }
+.cal-pop { position: absolute; top: 100%; left: 0; right: 0; z-index: 40; margin-top: 4px; padding: 8px 10px; background: var(--panel); border: 1px solid #444c56; border-radius: 6px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6); }
+#calTrigger.active { background: var(--blue); color: white; border-color: var(--blue); }
+.cal-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.cal-head button { background: var(--row); color: var(--fg); border: 1px solid var(--border); padding: 0 8px; height: 22px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+.cal-head button:hover { background: #21262d; border-color: #444c56; }
+.cal-year { font-weight: 600; font-size: 13px; min-width: 36px; text-align: center; }
+.cal-hint { margin-left: auto; }
+/* wide: month per row, 31 day columns */
+.cal-months { display: grid; grid-template-columns: 34px repeat(31, 1fr); gap: 2px; }
+.cal-mlabel { color: var(--mute); font-size: 10px; font-family: ui-monospace, monospace; align-self: center; }
+.cal-cell { position: relative; min-height: 26px; border-radius: 3px; display: flex; align-items: flex-end; justify-content: center; padding: 1px 1px 2px; overflow: hidden; }
+.cal-cell.blank { background: transparent; }
+.cal-cell[data-date] { cursor: pointer; }
+.cal-cell[data-date]:hover { outline: 1px solid #58a6ff; }
+.cal-cell.today { outline: 1px solid var(--amber); }
+.cal-cell.selected { outline: 2px solid #58a6ff; }
+.cal-cell .d { position: absolute; top: 1px; left: 2px; font-size: 7.5px; color: rgba(139, 148, 158, 0.8); font-family: ui-monospace, monospace; line-height: 1; }
+.cal-cell .v { font-size: 9.5px; font-family: ui-monospace, monospace; font-weight: 600; line-height: 1; white-space: nowrap; }
+/* narrow: classic 7-day weeks per month block */
+.cal-weeks { display: flex; flex-wrap: wrap; gap: 10px; }
+.cal-month-block { min-width: 196px; }
+.cal-month-block .cal-mlabel { margin-bottom: 3px; }
+.cal-week-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.cal-week-grid .cal-cell { min-height: 24px; }
+
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 8px; }
 .card { cursor: zoom-in; transition: outline 0.1s; }
 .card:hover svg { outline: 1px solid #2a4a6b; }

@@ -196,6 +196,97 @@ def _load_jsonl(path: str) -> dict:
     return out
 
 
+# ---------- Daily AIC aggregate (disk-cached) ----------
+
+# Per-session-dir daily AIC totals are persisted here so the full-history calendar view
+# doesn't reparse every jsonl on every request. Keyed by the dir's file signature
+# (name/mtime/size of every *.jsonl + models.json), so only changed sessions recompute.
+DAILY_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".daily_aic_cache.json")
+
+
+def _session_dir_signature(sess_dir: str) -> list:
+    sig = []
+    for fp in sorted(glob.glob(os.path.join(sess_dir, "*.jsonl"))):
+        try:
+            st = os.stat(fp)
+            sig.append([os.path.basename(fp), st.st_mtime, st.st_size])
+        except OSError:
+            continue
+    mj = os.path.join(sess_dir, "models.json")
+    try:
+        sig.append(["models.json", os.path.getmtime(mj), os.path.getsize(mj)])
+    except OSError:
+        pass
+    return sig
+
+
+def _daily_aic_for_dir(sess_dir: str) -> dict[str, float]:
+    """{YYYY-MM-DD: aic} for every llm_request in this session dir, bucketed by local day."""
+    models_info = _load_models_json(sess_dir)
+    if not models_info:
+        for sibling in glob.glob(os.path.dirname(sess_dir) + "/*/models.json"):
+            mi = _load_models_json(os.path.dirname(sibling))
+            if mi:
+                models_info = mi
+                break
+    days: dict[str, float] = {}
+    for fp in glob.glob(os.path.join(sess_dir, "*.jsonl")):
+        data = _load_jsonl(fp)
+        for e in data["events"]:
+            if e["kind"] != "req" or not e.get("ts"):
+                continue
+            aic = _aic_for(e["model"], models_info)
+            if aic <= 0:
+                continue
+            day = time.strftime("%Y-%m-%d", time.localtime(e["ts"] / 1000))
+            days[day] = days.get(day, 0.0) + aic
+    return days
+
+
+def daily_aic() -> dict[str, float]:
+    """Total AIC per local calendar day across ALL sessions on disk.
+
+    Every session dir is counted exactly once (search-subagent find-sessions live in
+    their own dirs, so there's no double counting with parent absorption).
+    """
+    try:
+        with open(DAILY_CACHE_PATH) as f:
+            cache = json.load(f)
+        if cache.get("version") != 1:
+            raise ValueError
+    except Exception:
+        cache = {"version": 1, "dirs": {}}
+    dirs = cache["dirs"]
+    seen = set()
+    dirty = False
+    totals: dict[str, float] = {}
+    for fp in glob.glob(f"{BASE}/*/GitHub.copilot-chat/debug-logs/*/main.jsonl"):
+        sess_dir = os.path.dirname(fp)
+        seen.add(sess_dir)
+        sig = _session_dir_signature(sess_dir)
+        ent = dirs.get(sess_dir)
+        if not ent or ent.get("sig") != sig:
+            days = _daily_aic_for_dir(sess_dir)
+            dirs[sess_dir] = {"sig": sig, "days": days}
+            dirty = True
+        else:
+            days = ent["days"]
+        for d, v in days.items():
+            totals[d] = totals.get(d, 0.0) + v
+    for d in [d for d in dirs if d not in seen]:
+        del dirs[d]
+        dirty = True
+    if dirty:
+        try:
+            tmp = DAILY_CACHE_PATH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(cache, f)
+            os.replace(tmp, DAILY_CACHE_PATH)
+        except OSError:
+            pass
+    return totals
+
+
 # ---------- Discovery ----------
 
 def discover_main_files(

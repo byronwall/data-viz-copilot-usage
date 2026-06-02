@@ -70,6 +70,14 @@ def api_sessions():
     })
 
 
+@app.route("/api/daily_aic")
+def api_daily_aic():
+    """Total AIC per local calendar day across all history (disk-cached aggregate)."""
+    t0 = time.time()
+    days = analyzer.daily_aic()
+    return jsonify({"days": days, "took_ms": int((time.time() - t0) * 1000)})
+
+
 @app.route("/api/session/<sid>")
 def api_session(sid):
     """Return detailed payload for one session. We scan recent main.jsonl files to find it."""
