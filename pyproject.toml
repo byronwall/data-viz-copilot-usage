@@ -1,0 +1,11 @@
+[project]
+name = "data-viz-copilot-usage"
+version = "0.1.0"
+description = "Interactive viewer for VS Code Copilot chat token usage"
+requires-python = ">=3.11"
+dependencies = [
+    "flask>=3.0",
+]
+
+[tool.uv]
+package = false

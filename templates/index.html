@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Copilot usage viewer</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Copilot usage <span id="banner-stats" class="muted"></span></h1>
+  <form id="controls">
+    <button type="button" id="prevBtn" title="Step backward by current range">◀</button>
+    <input type="datetime-local" id="start_date" title="Start">
+    <span class="sep muted">→</span>
+    <input type="datetime-local" id="end_date" title="End">
+    <button type="button" id="nextBtn" title="Step forward by current range">▶</button>
+    <span class="muted small" id="rangeInfo"></span>
+    <span class="vsep"></span>
+    <div class="quick-group">
+      <button type="button" class="quick" data-hours="1">1h</button>
+      <button type="button" class="quick" data-hours="6">6h</button>
+      <button type="button" class="quick" data-hours="24">1d</button>
+      <button type="button" class="quick" data-hours="72">3d</button>
+      <button type="button" class="quick" data-hours="168">7d</button>
+      <button type="button" class="quick" data-hours="720">30d</button>
+      <button type="button" class="quick" data-hours="2160">90d</button>
+    </div>
+    <span class="vsep"></span>
+    <select name="sort" id="sort" title="Sort">
+      <option value="total_input" selected>by total input</option>
+      <option value="aic">by AIC</option>
+      <option value="recent">by most recent</option>
+      <option value="uncached">by uncached input</option>
+      <option value="requests">by request count</option>
+      <option value="duration">by duration</option>
+    </select>
+    <input type="number" name="limit" id="limit" value="50" step="any" title="Top N" placeholder="Top N" style="width:64px;">
+    <input type="number" name="min_tokens" id="min_tokens" value="0" step="any" title="Min tokens" placeholder="min tok" style="width:84px;">
+    <button type="submit" class="primary">Refresh</button>
+    <span id="took" class="muted small"></span>
+  </form>
+  <div class="legend">
+    <span><span class="dot" style="background:#58a6ff"></span>foreground (panel/editAgent)</span>
+    <span><span class="dot" style="background:#a371f7"></span>sub-agent</span>
+    <span><span class="dot" style="background:#79c0ff"></span>🔍 search-subagent</span>
+    <span><span class="dia"></span> compaction</span>
+    <span><span class="dot" style="background:#d29922"></span>med cache</span>
+    <span><span class="dot" style="background:#f85149"></span>cold cache</span>
+    <span class="muted">click a chart to expand</span>
+  </div>
+</header>
+
+<main>
+  <div id="grid" class="grid"></div>
+  <div id="empty" class="empty" hidden>No sessions in this window.</div>
+</main>
+
+<div class="modal" id="modal">
+  <button class="modal-close" id="closeBtn">✕ close</button>
+  <div class="modal-body">
+    <div class="modal-left" id="modalLeft">
+      <div id="modalChart"></div>
+      <div id="modalLegend" class="modal-legend"></div>
+    </div>
+    <div class="modal-right" id="modalRight"></div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
