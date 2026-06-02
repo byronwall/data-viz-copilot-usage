@@ -40,23 +40,64 @@ COMPACT_NAMES = {
     "summarizeConversationHistory-simple",
     "summarizeVirtualTools",
 }
+# Requests VS Code sends with interactionTypeOverride:"conversation-background" — the
+# extension excludes their copilot usage from the per-turn credit badge, so we must too
+# (see setLastCopilotUsage gating in the copilot-chat bundle).
+BACKGROUND_NAMES = {
+    "git-branch",
+    "backgroundTodoAgent",
+    "summarize",
+    "title",
+    "promptCategorization",
+    "contextualProgressMessage",
+    "progressMessages",
+}
 FIND_PREFIX = "Find relevant code snippets for:"
 
 # ---------- Cache ----------
 
 _FILE_CACHE: dict[str, tuple[float, dict]] = {}
-_MODELS_CACHE: dict[str, tuple[float, dict]] = {}  # session_dir -> (mtime, {model_id: (multiplier, premium)})
-_GLOBAL_PRICES: dict[str, tuple[float, bool]] | None = None  # union across all models.json with non-null billing
+_MODELS_CACHE: dict[str, tuple[float, dict]] = {}  # session_dir -> (mtime, {model_id: billing-info dict})
+_GLOBAL_PRICES: dict[str, dict] | None = None  # union across all models.json with non-null billing
 _GLOBAL_PRICES_BUILT_AT: float = 0.0
 
 
-def _build_global_prices() -> dict[str, tuple[float, bool]]:
-    """Scan every models.json on disk; keep the best (non-null, highest multiplier) entry per model id."""
+def _parse_billing(m: dict) -> dict | None:
+    """Normalize one models.json entry's billing block.
+
+    Two schemas exist on disk:
+      old: {"multiplier": 1, "is_premium": true}              (premium-request counting)
+      new: {"token_prices": {"batch_size": 1e6, "default":    (credit pricing per token)
+            {"input_price": 250, "cache_price": 25, "output_price": 1500}}}
+    Returns {"prices": {...}} and/or {"mult": float, "premium": bool}, or None if unpopulated.
+    """
+    b = m.get("billing") or {}
+    info: dict = {}
+    tp = b.get("token_prices") or {}
+    d = tp.get("default") or {}
+    if d:
+        info["prices"] = {
+            "input": float(d.get("input_price", 0) or 0),
+            "cache": float(d.get("cache_price", 0) or 0),
+            "output": float(d.get("output_price", 0) or 0),
+            "batch": float(tp.get("batch_size", 1_000_000) or 1_000_000),
+        }
+    mult = b.get("multiplier")
+    premium = b.get("is_premium")
+    if mult is not None or premium is not None:
+        mult_f = float(mult or 0)
+        info["mult"] = mult_f
+        info["premium"] = bool(premium) if premium is not None else mult_f > 0
+    return info or None
+
+
+def _build_global_prices() -> dict[str, dict]:
+    """Scan every models.json on disk; keep the best (populated) billing entry per model id."""
     global _GLOBAL_PRICES, _GLOBAL_PRICES_BUILT_AT
     # rebuild at most once every 10 minutes
     if _GLOBAL_PRICES is not None and (time.time() - _GLOBAL_PRICES_BUILT_AT) < 600:
         return _GLOBAL_PRICES
-    table: dict[str, tuple[float, bool]] = {}
+    table: dict[str, dict] = {}
     for fp in glob.glob(f"{BASE}/*/GitHub.copilot-chat/debug-logs/*/models.json"):
         try:
             with open(fp) as f:
@@ -69,17 +110,14 @@ def _build_global_prices() -> dict[str, tuple[float, bool]]:
             mid = m.get("id")
             if not mid:
                 continue
-            b = m.get("billing") or {}
-            mult = b.get("multiplier")
-            premium = b.get("is_premium")
-            if mult is None and premium is None:
-                continue  # skip un-populated entries
-            mult_f = float(mult or 0)
-            prem_b = bool(premium) if premium is not None else mult_f > 0
+            info = _parse_billing(m)
+            if not info:
+                continue
             cur = table.get(mid)
-            # prefer the entry with the largest multiplier (newest/most-accurate)
-            if not cur or mult_f > cur[0]:
-                table[mid] = (mult_f, prem_b)
+            # prefer token-price entries (newer schema); among multiplier-only entries, the largest
+            if not cur or ("prices" in info and "prices" not in cur) or \
+               ("prices" not in cur and info.get("mult", 0) > cur.get("mult", 0)):
+                table[mid] = info
     _GLOBAL_PRICES = table
     _GLOBAL_PRICES_BUILT_AT = time.time()
     return table
@@ -95,35 +133,55 @@ def _load_models_json(session_dir: str) -> dict:
     cached = _MODELS_CACHE.get(path)
     if cached and cached[0] == mtime:
         return cached[1]
-    info: dict[str, tuple[float, bool]] = {}
+    info: dict[str, dict] = {}
     try:
         with open(path) as f:
             data = json.load(f)
         if isinstance(data, list):
             for m in data:
                 mid = m.get("id")
-                b = m.get("billing") or {}
-                if mid:
-                    info[mid] = (float(b.get("multiplier", 0) or 0), bool(b.get("is_premium", False)))
+                if not mid:
+                    continue
+                bi = _parse_billing(m)
+                if bi:
+                    info[mid] = bi
     except Exception:
         pass
     _MODELS_CACHE[path] = (mtime, info)
     return info
 
 
-def _aic_for(model_id: str, models_info: dict) -> float:
-    """AIC = premium-request multiplier (Copilot's billing unit). Non-premium = 0.
+def _aic_for_req(r: dict, models_info: dict) -> float:
+    """Credits (AIC) for one llm_request, matching VS Code's per-turn credit badge.
 
-    Falls back to the global price table if the session-local models.json doesn't have
-    a populated entry (recent gpt-5.x families often have null billing locally).
+    Priority:
+      1. attrs.copilotUsageNanoAiu — the billed value the Copilot API reports per request.
+         This is what VS Code itself sums (÷1e9) for the "N credits" badge, so it's exact.
+      2. token_prices from models.json: (input-cached)*input + cached*cache + output*output,
+         per batch_size tokens (verified to reproduce nanoAiu to the digit).
+      3. Legacy premium-request multiplier (older logs, pre credit-billing).
+
+    Background requests (title generator, todo agent, …) are excluded — VS Code skips
+    interactionTypeOverride:"conversation-background" requests when accumulating turn credits.
     """
-    mult, premium = models_info.get(model_id, (0.0, False))
-    if not premium and mult == 0:
-        # try global table
-        g = _build_global_prices().get(model_id)
-        if g:
-            mult, premium = g
-    return mult if premium else 0.0
+    if r.get("debugName") in BACKGROUND_NAMES:
+        return 0.0
+    nano = r.get("nano_aiu")
+    if nano is not None:
+        return nano / 1e9
+    model_id = r.get("model")
+    info = models_info.get(model_id)
+    if not info or ("prices" not in info and not info.get("premium")):
+        # session-local entry missing/unpopulated (recent gpt-5.x often have null billing
+        # locally) — fall back to the global table built from every models.json on disk
+        info = _build_global_prices().get(model_id) or info or {}
+    p = info.get("prices")
+    if p:
+        inp = r.get("input", 0) or 0
+        cached = r.get("cached", 0) or 0
+        out = r.get("output", 0) or 0
+        return (max(0, inp - cached) * p["input"] + cached * p["cache"] + out * p["output"]) / p["batch"]
+    return info.get("mult", 0.0) if info.get("premium") else 0.0
 
 
 def _short(s, n=200):
@@ -168,6 +226,9 @@ def _load_jsonl(path: str) -> dict:
                         "debugName": a.get("debugName", "?"),
                         "ttft": a.get("ttft", 0) or 0,
                         "model": a.get("model", "?"),
+                        # billed credits ×1e9, reported by the Copilot API per request;
+                        # None on older logs / failed requests
+                        "nano_aiu": a.get("copilotUsageNanoAiu"),
                         # failed requests (server error / websocket drop) report no usage;
                         # they show up as 0/0 token turns unless flagged
                         "is_error": d.get("status") == "error",
@@ -235,7 +296,7 @@ def _daily_aic_for_dir(sess_dir: str) -> dict[str, float]:
         for e in data["events"]:
             if e["kind"] != "req" or not e.get("ts"):
                 continue
-            aic = _aic_for(e["model"], models_info)
+            aic = _aic_for_req(e, models_info)
             if aic <= 0:
                 continue
             day = time.strftime("%Y-%m-%d", time.localtime(e["ts"] / 1000))
@@ -252,10 +313,10 @@ def daily_aic() -> dict[str, float]:
     try:
         with open(DAILY_CACHE_PATH) as f:
             cache = json.load(f)
-        if cache.get("version") != 1:
+        if cache.get("version") != 2:  # v2: nanoAiu/token-price credits replaced multiplier counting
             raise ValueError
     except Exception:
-        cache = {"version": 1, "dirs": {}}
+        cache = {"version": 2, "dirs": {}}
     dirs = cache["dirs"]
     seen = set()
     dirty = False
@@ -289,12 +350,12 @@ def daily_aic() -> dict[str, float]:
 
 # ---------- Discovery ----------
 
-def discover_main_files(
+def resolve_window(
     since_seconds: float | None = None,
     start_ts: float | None = None,
     end_ts: float | None = None,
-) -> list[str]:
-    """All main.jsonl files whose mtime falls in the window.
+) -> tuple[float, float]:
+    """Normalize the two ways a window can be expressed into absolute (start, end).
 
     Pass EITHER `since_seconds` (relative to now) OR `start_ts`/`end_ts` (absolute epoch
     seconds). If both are given, the absolute window wins.
@@ -302,16 +363,29 @@ def discover_main_files(
     if start_ts is None and end_ts is None and since_seconds is not None:
         start_ts = time.time() - since_seconds
         end_ts = time.time()
-    if start_ts is None:
-        start_ts = 0
-    if end_ts is None:
-        end_ts = time.time()
+    return (start_ts if start_ts is not None else 0,
+            end_ts if end_ts is not None else time.time())
+
+
+def discover_main_files(
+    since_seconds: float | None = None,
+    start_ts: float | None = None,
+    end_ts: float | None = None,
+) -> list[str]:
+    """Candidate main.jsonl files for the window, pre-filtered by mtime.
+
+    mtime is the LAST write: mtime < window start ⇒ the session ended before the
+    window and can't intersect it, so it's skipped cheaply. No upper mtime cut is
+    applied — a session started inside (or before) the window keeps a fresh mtime
+    while it's active. The precise "lifetime intersects window" test happens in
+    query_sessions() against the session's first/last event timestamps.
+    """
+    start_ts, _ = resolve_window(since_seconds, start_ts, end_ts)
     pat = f"{BASE}/*/GitHub.copilot-chat/debug-logs/*/main.jsonl"
     out = []
     for fp in glob.glob(pat):
         try:
-            mt = os.path.getmtime(fp)
-            if start_ts <= mt <= end_ts and os.path.getsize(fp) >= 200:
+            if os.path.getmtime(fp) >= start_ts and os.path.getsize(fp) >= 200:
                 out.append(fp)
         except OSError:
             continue
@@ -397,7 +471,7 @@ def assemble_session(main_path: str) -> Optional[Session]:
             if mi:
                 models_info = mi
                 break
-    total_aic = sum(_aic_for(r["model"], models_info) for r in all_reqs)
+    total_aic = sum(_aic_for_req(r, models_info) for r in all_reqs)
 
     # Detect if this is a search-subagent find-session
     search_query = None
@@ -536,6 +610,7 @@ def build_series(sess: Session) -> tuple[list, list]:
                 "ts": e["ts"], "t_rel": e["ts"] - t0,
                 "input": e["input"], "cached": e["cached"], "output": e["output"],
                 "debugName": e["debugName"], "model": e["model"], "ttft": e["ttft"],
+                "nano_aiu": e.get("nano_aiu"),
                 "is_compact": e["debugName"] in COMPACT_NAMES,
                 "is_error": e.get("is_error", False), "error": e.get("error", ""),
                 "tools_before": pending[:],
@@ -576,6 +651,7 @@ def build_series(sess: Session) -> tuple[list, list]:
                 ccalls.append({"idx": len(ccalls), "ts": e["ts"], "t_rel": e["ts"] - t0,
                                "input": e["input"], "cached": e["cached"], "output": e["output"],
                                "debugName": e["debugName"], "model": e["model"], "ttft": e["ttft"],
+                               "nano_aiu": e.get("nano_aiu"),
                                "is_compact": e["debugName"] in COMPACT_NAMES,
                                "is_error": e.get("is_error", False), "error": e.get("error", ""),
                                "tools_before": pending[:]})
@@ -633,11 +709,21 @@ def query_sessions(
     limit: int = 50,
     sort: str = "total_input",
 ) -> list[Session]:
-    paths = discover_main_files(since_seconds=since_seconds, start_ts=start_ts, end_ts=end_ts)
+    win_start, win_end = resolve_window(since_seconds, start_ts, end_ts)
+    paths = discover_main_files(start_ts=win_start, end_ts=win_end)
     sessions: list[Session] = []
     for fp in paths:
         s = assemble_session(fp)
         if not s:
+            continue
+        # A session belongs to the window if its lifetime INTERSECTS it:
+        # [first event ts, last write] overlaps [win_start, win_end]. This keeps
+        # ongoing chats visible both in historical windows (they started there)
+        # and in "last N hours" windows (they're active there) regardless of
+        # where the chat began.
+        started = (s.main["t0"] / 1000) if s.main.get("t0") else s.mtime
+        ended = max(s.mtime, started)
+        if started > win_end or ended < win_start:
             continue
         if s.total_input < min_tokens:
             continue
@@ -688,7 +774,7 @@ def session_summary(s: Session) -> dict:
     main_calls, kids = build_series(s)
 
     def with_aic(c):
-        return _aic_for(c["model"], s.models_info)
+        return _aic_for_req(c, s.models_info)
 
     return {
         "sid": s.sid,
@@ -736,7 +822,7 @@ def session_detail(s: Session) -> dict:
             "output": c["output"], "dbg": c["debugName"], "model": c["model"],
             "ttft": c["ttft"], "compact": c["is_compact"],
             "err": c.get("is_error", False), "err_msg": c.get("error", ""),
-            "aic": _aic_for(c["model"], s.models_info),
+            "aic": _aic_for_req(c, s.models_info),
             "cum": c.get("cum"), "cum_offset": c.get("cum_offset"),
             "tools": [{"n": t["name"], "a": t["args"], "rc": t["result_chars"],
                        "d": t["dur"], "s": t["status"], "t": t["t_rel"]}

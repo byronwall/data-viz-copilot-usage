@@ -7,8 +7,7 @@ function fmt(n) { return Number(n || 0).toLocaleString(); }
 function fmtAic(n) {
   n = Number(n || 0);
   if (n === 0) return "0";
-  if (n < 10) return n.toFixed(1);
-  if (n < 1000) return Math.round(n).toString();
+  if (n < 1000) return n.toFixed(1);  // one decimal, like VS Code's credit badge
   if (n < 1e6) return (n / 1000).toFixed(1) + "k";
   return (n / 1e6).toFixed(2) + "M";
 }
@@ -739,9 +738,9 @@ async function loadSessions() {
 document.getElementById("controls").addEventListener("submit", e => {
   e.preventDefault();
   // Refresh means "show everything on disk right now": re-anchor a pinned
-  // ("last N hours") window to now so sessions written since the last load are
-  // included. NB: sessions are matched by file mtime, so a window whose end has
-  // drifted into the past silently drops still-active sessions.
+  // ("last N hours") window to now so sessions started since the last load are
+  // included. (Sessions are matched by lifetime overlap, so still-active
+  // sessions remain visible even in windows whose end is in the past.)
   const [s, en] = getRangeTs();
   if (RANGE_PINNED && s && en) {
     const now = Math.floor(Date.now() / 1000);
