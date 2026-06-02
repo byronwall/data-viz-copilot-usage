@@ -4,13 +4,23 @@ Interactive web viewer for VS Code Copilot chat token usage. Reads the local deb
 
 The log location is auto-detected per platform:
 
-| Platform | workspaceStorage |
-| --- | --- |
-| macOS | `~/Library/Application Support/Code/User/workspaceStorage` |
-| Linux | `$XDG_CONFIG_HOME/Code/User/workspaceStorage` (default `~/.config/...`) |
-| Windows | `%APPDATA%\Code\User\workspaceStorage` |
+| Platform | workspaceStorage                                                        |
+| -------- | ----------------------------------------------------------------------- |
+| macOS    | `~/Library/Application Support/Code/User/workspaceStorage`              |
+| Linux    | `$XDG_CONFIG_HOME/Code/User/workspaceStorage` (default `~/.config/...`) |
+| Windows  | `%APPDATA%\Code\User\workspaceStorage`                                  |
 
 Using VS Code Insiders, VSCodium, or a portable install? Point the `COPILOT_USAGE_STORAGE` env var at the equivalent `workspaceStorage` directory.
+
+## Visuals
+
+### Small multiples, one per session
+
+![](docs/img/small-multiples.png)
+
+### Detailed view, session
+
+![](docs/img/details.png)
 
 ## Run
 
