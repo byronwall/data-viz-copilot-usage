@@ -11,7 +11,7 @@ with "Find relevant code snippets for:" are standalone subagent-search sessions 
 they appear in the main list as just another session (no parent linkage in the log files).
 """
 from __future__ import annotations
-import os, sys, json, glob, time, math
+import os, sys, json, glob, time, math, re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -191,6 +191,58 @@ def _short(s, n=200):
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+def _clip(s, n=4000):
+    """Like _short but preserves newlines — used for args/results the UI renders verbatim."""
+    if not isinstance(s, str):
+        s = str(s)
+    s = s.strip()
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+_TEXT_FIELD_RE = re.compile(r'"text":"((?:[^"\\]|\\.)*)"')
+
+
+def _result_text(r, n=2000):
+    """Tool results are usually a serialized VS Code node tree (nested {text:...} nodes);
+    flatten those into readable text. Plain-text results (terminal output) pass through."""
+    if not isinstance(r, str):
+        r = str(r)
+    r = r.strip()
+    if not r:
+        return ""
+    if r[:1] in "{[":
+        texts: list[str] = []
+        try:
+            obj = json.loads(r)
+
+            def walk(x):
+                if isinstance(x, dict):
+                    t = x.get("text")
+                    if isinstance(t, str) and t:
+                        texts.append(t)
+                    for v in x.values():
+                        walk(v)
+                elif isinstance(x, list):
+                    for v in x:
+                        walk(v)
+
+            walk(obj)
+        except Exception:
+            pass
+        # Results are truncated at ~5KB by the logger, so the node-tree JSON is often
+        # incomplete and won't parse. Fall back to a regex sweep of "text":"…" fields,
+        # which still reads correctly up to the truncation point.
+        if not texts:
+            for m in _TEXT_FIELD_RE.findall(r):
+                try:
+                    texts.append(json.loads('"' + m + '"'))
+                except Exception:
+                    texts.append(m)
+        if texts:
+            r = "\n".join(texts)
+    return r if len(r) <= n else r[: n - 1] + "…"
+
+
 def _load_jsonl(path: str) -> dict:
     """Parse one jsonl file into ordered events. Cached by mtime."""
     try:
@@ -239,8 +291,8 @@ def _load_jsonl(path: str) -> dict:
                         "kind": "tool",
                         "ts": ts,
                         "name": d.get("name", "?"),
-                        "args": _short(a.get("args", "") or "", 280),
-                        "result_chars": len(a.get("result", "") or ""),
+                        "args": _clip(a.get("args", "") or "", 4000),
+                        "result": _result_text(a.get("result", "") or "", 2000),
                         "dur": d.get("dur", 0) or 0,
                         "status": d.get("status", "?"),
                     })
@@ -399,6 +451,10 @@ class Session:
     sid: str
     workspace: str
     mtime: float
+    # epoch ms of the LAST real conversation event. Unlike mtime, this is immune to the
+    # log file being rewritten/touched later (which Copilot does on reopen) — so it's the
+    # honest "when did this chat actually happen" timestamp for display.
+    last_event_ts: int
     main: dict
     children: list[dict] = field(default_factory=list)
     total_input: int = 0
@@ -483,6 +539,7 @@ def assemble_session(main_path: str) -> Optional[Session]:
         sid=sid,
         workspace=ws,
         mtime=os.path.getmtime(main_path),
+        last_event_ts=last_ts,
         main=main,
         children=children,
         total_input=total_input,
@@ -599,10 +656,10 @@ def build_series(sess: Session) -> tuple[list, list]:
     pending = []
     for e in p["events"]:
         if e["kind"] == "tool":
-            pending.append({"name": e["name"], "args": e["args"], "result_chars": e["result_chars"],
+            pending.append({"name": e["name"], "args": e["args"], "result": e.get("result", ""),
                             "dur": e["dur"], "status": e["status"], "t_rel": e["ts"] - t0})
         elif e["kind"] == "user":
-            pending.append({"name": "user_message", "args": e["text"], "result_chars": 0,
+            pending.append({"name": "user_message", "args": e["text"], "result": "",
                             "dur": 0, "status": "ok", "t_rel": e["ts"] - t0})
         elif e["kind"] == "req":
             main_calls.append({
@@ -632,20 +689,14 @@ def build_series(sess: Session) -> tuple[list, list]:
         start_t = creqs[0]["ts"] - t0
         if start_t < 0:
             continue
-        pcum = 0
-        for mc in main_calls:
-            if mc["t_rel"] <= start_t:
-                pcum = mc["cum"]
-            else:
-                break
         ccalls = []
         pending = []
         for e in c["events"]:
             if e["kind"] == "tool":
-                pending.append({"name": e["name"], "args": e["args"], "result_chars": e["result_chars"],
+                pending.append({"name": e["name"], "args": e["args"], "result": e.get("result", ""),
                                 "dur": e["dur"], "status": e["status"], "t_rel": e["ts"] - t0})
             elif e["kind"] == "user":
-                pending.append({"name": "user_message", "args": e["text"], "result_chars": 0,
+                pending.append({"name": "user_message", "args": e["text"], "result": "",
                                 "dur": 0, "status": "ok", "t_rel": e["ts"] - t0})
             elif e["kind"] == "req":
                 ccalls.append({"idx": len(ccalls), "ts": e["ts"], "t_rel": e["ts"] - t0,
@@ -656,11 +707,14 @@ def build_series(sess: Session) -> tuple[list, list]:
                                "is_error": e.get("is_error", False), "error": e.get("error", ""),
                                "tools_before": pending[:]})
                 pending = []
+        # Each sub-agent gets its own line rising from a 0 baseline at its spawn
+        # point — cum_offset is the kid's OWN running total, not a continuation of
+        # the parent's stack. (Mirrors how search-subagents are anchored below.)
         cc = 0
         for x in ccalls:
             cc += x["input"]
-            x["cum_offset"] = pcum + cc
-        kids.append({"label": c["label"], "start_t": start_t, "start_tok": pcum, "calls": ccalls})
+            x["cum_offset"] = cc
+        kids.append({"label": c["label"], "start_t": start_t, "start_tok": 0, "calls": ccalls})
 
     # Absorb search-children as virtual kids, anchored at the parent's tool_call.ts
     for csid in sess.search_children:
@@ -717,12 +771,14 @@ def query_sessions(
         if not s:
             continue
         # A session belongs to the window if its lifetime INTERSECTS it:
-        # [first event ts, last write] overlaps [win_start, win_end]. This keeps
+        # [first event ts, last event ts] overlaps [win_start, win_end]. This keeps
         # ongoing chats visible both in historical windows (they started there)
         # and in "last N hours" windows (they're active there) regardless of
-        # where the chat began.
+        # where the chat began. We use the last EVENT time, not the file mtime —
+        # Copilot rewrites the log on reopen, bumping mtime to "now" with no new
+        # events, which would otherwise drag a stale session into recent windows.
         started = (s.main["t0"] / 1000) if s.main.get("t0") else s.mtime
-        ended = max(s.mtime, started)
+        ended = max(s.last_event_ts / 1000, started)
         if started > win_end or ended < win_start:
             continue
         if s.total_input < min_tokens:
@@ -730,7 +786,7 @@ def query_sessions(
         sessions.append(s)
     key = {
         "total_input": lambda s: -s.total_input,
-        "recent": lambda s: -s.mtime,
+        "recent": lambda s: -s.last_event_ts,
         "requests": lambda s: -s.n_requests,
         "duration": lambda s: -s.duration_ms,
         "uncached": lambda s: -(s.total_input - s.total_cached),
@@ -780,6 +836,7 @@ def session_summary(s: Session) -> dict:
         "sid": s.sid,
         "workspace": s.workspace,
         "mtime": s.mtime,
+        "last_event_ts": s.last_event_ts,
         "first_user": s.first_user,
         "total_input": s.total_input,
         "total_cached": s.total_cached,
@@ -824,7 +881,7 @@ def session_detail(s: Session) -> dict:
             "err": c.get("is_error", False), "err_msg": c.get("error", ""),
             "aic": _aic_for_req(c, s.models_info),
             "cum": c.get("cum"), "cum_offset": c.get("cum_offset"),
-            "tools": [{"n": t["name"], "a": t["args"], "rc": t["result_chars"],
+            "tools": [{"n": t["name"], "a": t["args"], "res": t.get("result", ""),
                        "d": t["dur"], "s": t["status"], "t": t["t_rel"]}
                       for t in c["tools_before"]],
         }
@@ -833,6 +890,7 @@ def session_detail(s: Session) -> dict:
         "sid": s.sid,
         "workspace": s.workspace,
         "mtime": s.mtime,
+        "last_event_ts": s.last_event_ts,
         "first_user": s.first_user,
         "total_input": s.total_input,
         "total_cached": s.total_cached,

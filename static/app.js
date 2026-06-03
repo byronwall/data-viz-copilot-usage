@@ -20,6 +20,52 @@ function hms(ms) {
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
 }
+// Render a tool arg/result blob: JSON objects become a dense 2-column key/value
+// table; everything else renders as a verbatim text chunk.
+function renderValue(str) {
+  str = String(str ?? "");
+  const trimmed = str.trim();
+  if (trimmed[0] === "{" || trimmed[0] === "[") {
+    try {
+      const obj = JSON.parse(trimmed);
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+        const rows = Object.entries(obj).map(([k, v]) => {
+          const val = typeof v === "string" ? v : JSON.stringify(v);
+          return `<tr><td class="k">${escapeHtml(k)}</td><td class="v">${escapeHtml(val)}</td></tr>`;
+        }).join("");
+        if (rows) return `<table class="kv">${rows}</table>`;
+      }
+    } catch (_) { /* fall through to text */ }
+  }
+  return `<div class="txt">${escapeHtml(str)}</div>`;
+}
+// One-line gist of a tool's args for the collapsed summary row — pick the single
+// most telling field (file path, command, query, …) or fall back to the raw text.
+function summarizeArgs(str) {
+  const t = String(str ?? "").trim();
+  if (t[0] === "{" || t[0] === "[") {
+    try {
+      const obj = JSON.parse(t);
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+        const keys = ["filePath", "path", "command", "query", "pattern", "search",
+                      "filePattern", "includePattern", "description", "agentName",
+                      "explanation", "input", "url"];
+        const pick = keys.find(k => obj[k] != null && obj[k] !== "")
+          || Object.keys(obj).find(k => obj[k] != null && obj[k] !== "");
+        if (pick) {
+          const v = obj[pick];
+          return oneLine(typeof v === "string" ? v : JSON.stringify(v));
+        }
+        return "";
+      }
+    } catch (_) { /* fall through */ }
+  }
+  return oneLine(t);
+}
+function oneLine(s) {
+  s = String(s).replace(/\s+/g, " ").trim();
+  return s.length > 110 ? s.slice(0, 109) + "…" : s;
+}
 function niceCeil(n) {
   if (n <= 0) return 1000;
   const mag = Math.pow(10, Math.floor(Math.log10(n)));
@@ -120,7 +166,10 @@ function renderChart(payload, opts) {
 
   // header — two lines
   const cp = payload.total_input > 0 ? Math.round(100 * payload.total_cached / payload.total_input) : 0;
-  const date = new Date(payload.mtime * 1000).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  // last_event_ts (epoch ms) is the real end of the chat; fall back to file mtime only if absent.
+  // mtime can drift to "now" when Copilot rewrites the log on reopen, so it must not drive the date.
+  const dateMs = payload.last_event_ts || payload.mtime * 1000;
+  const date = new Date(dateMs).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   const nReq = (payload.main || []).length;
   const nKids = (payload.kids || []).length;
   const nCompact = payload.n_compactions || (payload.main || []).filter(c => c.compact).length + (payload.kids || []).reduce((s, k) => s + k.calls.filter(c => c.compact).length, 0);
@@ -152,6 +201,8 @@ function renderChart(payload, opts) {
   const mainTurns = (payload.main || []).filter(c => c.dbg === "panel/editAgent" && !c.err);
   let maxPerTurn = 0;
   for (const c of mainTurns) if (c.input > maxPerTurn) maxPerTurn = c.input;
+  // sub-agents each get their own per-turn line, so their turns count toward the y-scale too
+  for (const k of (payload.kids || [])) for (const c of k.calls) if (!c.err && c.input > maxPerTurn) maxPerTurn = c.input;
   const niceMaxPerTurn = niceCeil(maxPerTurn || 1000);
   const subY = v => subBot - (Math.min(v, niceMaxPerTurn) / niceMaxPerTurn) * subH;
 
@@ -172,14 +223,10 @@ function renderChart(payload, opts) {
     svg += `<text x="${ml + 4}" y="${subTop + 9}" fill="#7d8590" font-size="8.5">per-turn input</text>`;
   }
 
-  // area fill + line through foreground per-turn inputs
+  // line through foreground per-turn inputs (no fill — keeps the band readable
+  // once sub-agent lines are layered on top).
   if (mainTurns.length >= 1) {
     const pts = mainTurns.map(c => [X(c.t), subY(c.input)]);
-    // build closed path for the fill (baseline at subBot)
-    const fillPath = `M ${pts[0][0].toFixed(1)},${subBot.toFixed(1)} L ` +
-      pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" L ") +
-      ` L ${pts[pts.length - 1][0].toFixed(1)},${subBot.toFixed(1)} Z`;
-    svg += `<path d="${fillPath}" fill="#58a6ff" opacity="0.18"/>`;
     if (pts.length >= 2) {
       const linePath = "M " + pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" L ");
       svg += `<path d="${linePath}" fill="none" stroke="#58a6ff" stroke-width="${big ? 1.4 : 1.2}" opacity="0.85"/>`;
@@ -191,6 +238,22 @@ function renderChart(payload, opts) {
       svg += `<circle cx="${X(c.t).toFixed(1)}" cy="${subY(c.input).toFixed(1)}" r="${r}" fill="${fill}" opacity="0.95"/>`;
     }
   }
+
+  // one dedicated per-turn line per sub-agent, colored to match the main chart
+  (payload.kids || []).forEach((k, i) => {
+    const col = k.is_search_child ? "#79c0ff" : PALETTE[i % PALETTE.length];
+    const dash = k.is_search_child ? "5,2" : (big ? "4,3" : "2,2");
+    const turns = k.calls.filter(c => !c.err);
+    if (turns.length === 0) return;
+    const pts = turns.map(c => [X(c.t), subY(c.input)]);
+    if (pts.length >= 2) {
+      const linePath = "M " + pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" L ");
+      svg += `<path d="${linePath}" fill="none" stroke="${col}" stroke-width="${big ? 1.3 : 1}" stroke-dasharray="${dash}" opacity="0.85"/>`;
+    }
+    for (const [x, y] of pts) {
+      svg += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${big ? 1.8 : 1.2}" fill="${col}" opacity="0.9"/>`;
+    }
+  });
 
   // Footer: first user message
   const title = escapeHtml((payload.first_user || "(no user msg)").slice(0, big ? 110 : 70));
@@ -225,7 +288,7 @@ function renderDetail(payload) {
 
   let html = `
   <div class="modal-header">
-    <div class="modal-meta">${escapeHtml(payload.sid)} · ws ${escapeHtml(payload.workspace || "")} · ${new Date(payload.mtime * 1000).toLocaleString()} · model ${escapeHtml(payload.top_model)}</div>
+    <div class="modal-meta">${escapeHtml(payload.sid)} · ws ${escapeHtml(payload.workspace || "")} · ${new Date(payload.last_event_ts || payload.mtime * 1000).toLocaleString()} · model ${escapeHtml(payload.top_model)}</div>
     <div class="modal-prompt">${escapeHtml(payload.first_user || "(no user message)")}</div>
     ${linkChip}
     <div class="modal-totals">
@@ -273,12 +336,13 @@ function renderDetail(payload) {
     const dbgClass = c.compact ? "dbg compact" : "dbg";
     const compactClass = c.compact ? "compact-row" : "";
     const tools = c.tools || [];
+    const hasTools = tools.length > 0;
     const toolSummary = tools.length === 0
       ? `<span style="color:#444">—</span>`
       : tools.slice(0, 3).map(t => `<span style="color:#79c0ff">${escapeHtml(t.n)}</span>`).join(" ")
         + (tools.length > 3 ? ` <span style="color:#666">+${tools.length - 3}</span>` : "");
-    html += `<tr class="call ${compactClass}" data-idx="${idx}">
-      <td>${c.idx + 1}</td>
+    html += `<tr class="call ${compactClass}${hasTools ? " expandable" : ""}" data-idx="${idx}">
+      <td>${hasTools ? `<span class="caret">▸</span>` : ""}${c.idx + 1}</td>
       <td>${hms(c.t)}</td>
       <td class="${dbgClass}">${escapeHtml(c.dbg)}${c.err ? ` <span style="color:#f85149" title="${escapeHtml(c.err_msg || "request failed")}">✕ error</span>` : ""}</td>
       <td class="num">${fmt(c.input)}</td>
@@ -289,10 +353,13 @@ function renderDetail(payload) {
       <td>${toolSummary}</td>
     </tr>`;
     if (tools.length > 0) {
-      html += `<tr class="tools"><td colspan="9"><div class="tools-inner">`;
+      html += `<tr class="tools collapsed"><td colspan="9"><div class="tools-inner">`;
       tools.forEach(t => {
-        const sz = t.rc > 0 ? `${(t.rc / 1024).toFixed(1)}KB` : (t.d > 0 ? `${t.d}ms` : "");
-        html += `<div class="tool"><span class="nm">${escapeHtml(t.n)}</span><span class="sz">${sz}</span><span class="ag">${escapeHtml(t.a || "")}</span></div>`;
+        const dur = t.d > 0 ? `<span class="dur">${t.d}ms</span>` : "";
+        const summary = summarizeArgs(t.a || "");
+        let detail = renderValue(t.a || "");
+        if (t.res) detail += `<div class="res"><span class="reslbl">result</span><div class="res-body clamped">${renderValue(t.res)}</div><button class="res-toggle" type="button">show more</button></div>`;
+        html += `<div class="tool"><div class="tool-head"><span class="caret">▸</span><span class="nm">${escapeHtml(t.n)}</span>${dur}<span class="summary">${escapeHtml(summary)}</span></div><div class="tool-detail collapsed">${detail}</div></div>`;
       });
       html += `</div></td></tr>`;
     }
@@ -352,6 +419,40 @@ function wireSelect(svgEl, rightEl) {
   });
 }
 
+// Progressive disclosure for the detail table: clicking a step row toggles its
+// (initially collapsed) tool-detail row.
+function wireExpand(rightEl) {
+  rightEl.querySelectorAll("tr.call.expandable").forEach(row => {
+    row.addEventListener("click", () => {
+      const tools = row.nextElementSibling;
+      if (!tools || !tools.classList.contains("tools")) return;
+      const nowCollapsed = tools.classList.toggle("collapsed");
+      row.classList.toggle("expanded", !nowCollapsed);
+    });
+  });
+  // second-level disclosure: each tool shows a one-line summary; clicking it
+  // reveals the full args/result detail.
+  rightEl.querySelectorAll(".tool .tool-head").forEach(head => {
+    head.addEventListener("click", e => {
+      e.stopPropagation();
+      const detail = head.nextElementSibling;
+      if (!detail || !detail.classList.contains("tool-detail")) return;
+      detail.classList.toggle("collapsed");
+      head.closest(".tool").classList.toggle("expanded");
+    });
+  });
+  // result preview clamp toggles (live inside the tools rows, not the call rows)
+  rightEl.querySelectorAll("button.res-toggle").forEach(btn => {
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      const body = btn.previousElementSibling;
+      if (!body) return;
+      const clamped = body.classList.toggle("clamped");
+      btn.textContent = clamped ? "show more" : "show less";
+    });
+  });
+}
+
 // ---------- Modal ----------
 let MODAL_SID = null;
 
@@ -391,6 +492,7 @@ async function openModal(sid, maxTok) {
     <span><span class="dot" style="background:#f85149"></span>cold cache</span>
     <span class="muted">click a dot or row to select</span>`;
   wireSelect(chartHolder.querySelector("svg"), right);
+  wireExpand(right);
 }
 
 function closeModal() {
