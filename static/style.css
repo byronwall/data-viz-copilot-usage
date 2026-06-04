@@ -135,6 +135,10 @@ table.rollup td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .modal-totals { display: flex; gap: 14px; font-size: 11px; color: var(--mute); flex-wrap: wrap; }
 .modal-totals b { color: var(--fg); }
 
+/* Unit suffix tint for abbreviated quantities (qty()): k muted, M brighter. */
+.q-k { color: #768390; font-weight: 400; }
+.q-m { color: #d2a8ff; font-weight: 400; }
+
 table.calls { width: 100%; border-collapse: collapse; font-size: 11px; }
 table.calls th { position: sticky; top: var(--calls-th-top, 0); background: #21262d; color: #8b949e; text-align: left; padding: 6px 8px; font-weight: 600; border-bottom: 1px solid var(--border); z-index: 4; }
 table.calls th.num { text-align: center; }

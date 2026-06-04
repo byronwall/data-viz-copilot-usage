@@ -5,6 +5,31 @@ const PALETTE = ["#a371f7", "#3fb950", "#ff7b72", "#f0883e", "#79c0ff", "#ffa657
 
 function fmt(n) { return Number(n || 0).toLocaleString(); }
 
+// ---------- Quantity abbreviation ----------
+// Big token counts get noisy when shown in full (3,893,592). qty()/qtySvg() collapse
+// them to a short value + unit suffix (3.89M, 222k) and tint the suffix so the magnitude
+// reads at a glance — k is muted gray, M (the bigger numbers) gets a brighter accent.
+const QTY_UNIT_COLOR = { k: "#768390", M: "#d2a8ff" };
+function qtyParts(n) {
+  n = Number(n || 0);
+  const a = Math.abs(n);
+  if (a >= 1e6) return { num: (n / 1e6).toFixed(2).replace(/\.?0+$/, ""), unit: "M" };
+  if (a >= 1e3) return { num: String(Math.round(n / 1e3)), unit: "k" };
+  return { num: String(Math.round(n)), unit: "" };
+}
+// HTML form (uses .q-k / .q-m classes from style.css for the suffix tint).
+function qty(n) {
+  const { num, unit } = qtyParts(n);
+  return unit ? `${num}<span class="q-${unit}">${unit}</span>` : num;
+}
+// SVG form — suffix is an inline-filled <tspan> so it works inside chart <text> nodes.
+function qtySvg(n) {
+  const { num, unit } = qtyParts(n);
+  return unit ? `${num}<tspan fill="${QTY_UNIT_COLOR[unit]}">${unit}</tspan>` : num;
+}
+// Plain-text form (no markup) for textContent contexts.
+function qtyText(n) { const { num, unit } = qtyParts(n); return num + unit; }
+
 // ---------- Cost unit (global) ----------
 // All cost figures are stored as AIC (Copilot credits). The UNIT toggle re-expresses
 // them as US dollars at the fixed 100 AIC = $1 rate. fmtAic() returns the bare number
@@ -236,10 +261,10 @@ function renderChart(payload, opts) {
   // Row 1: date + input + uncached — the headline "how big was it" fields.
   // Kept short so the line fits inside the narrow (360px) grid cards.
   const hdr_uncached = (payload.total_input || 0) - (payload.total_cached || 0);
-  let row1 = `<text x="6" y="${big ? 16 : 14}" fill="#c9d1d9" font-size="${fs1}" font-weight="600">${escapeHtml(date)} · <tspan fill="#c9d1d9">${fmt(payload.total_input)}</tspan> in · <tspan fill="#f85149">${fmt(hdr_uncached)}</tspan> uncached</text>`;
+  let row1 = `<text x="6" y="${big ? 16 : 14}" fill="#c9d1d9" font-size="${fs1}" font-weight="600">${escapeHtml(date)} · <tspan fill="#c9d1d9">${qtySvg(payload.total_input)}</tspan> in · <tspan fill="#f85149">${qtySvg(hdr_uncached)}</tspan> uncached</text>`;
   // Row 2: output + cache% + AIC (the rest of the totals) followed by turn structure
   // (reqs, subs, compactions, linkage chips). Overflow from row 1 lands here so it all fits.
-  let row2parts = [`<tspan fill="#c9d1d9">${fmt(payload.total_output)}</tspan> out`];
+  let row2parts = [`<tspan fill="#c9d1d9">${qtySvg(payload.total_output)}</tspan> out`];
   row2parts.push(`<tspan fill="${cp >= 70 ? "#58a6ff" : cp >= 30 ? "#d29922" : "#f85149"}">${cp}%</tspan> cache`);
   if (payload.total_aic > 0) row2parts.push(`<tspan fill="#56d364">${fmtCost(payload.total_aic)}</tspan>`);
   row2parts.push(`${nReq} req`);
@@ -365,10 +390,10 @@ function renderDetail(payload) {
     <div class="modal-prompt">${escapeHtml(payload.first_user || "(no user message)")}</div>
     ${linkChip}
     <div class="modal-totals">
-      <span>input <b>${fmt(total_in)}</b></span>
-      <span>cached <b style="color:#58a6ff">${fmt(total_cached)}</b> (${total_in ? Math.round(100 * total_cached / total_in) : 0}%)</span>
-      <span>uncached <b style="color:#f85149">${fmt(total_uncached)}</b></span>
-      <span>output <b>${fmt(total_out)}</b></span>
+      <span>input <b>${qty(total_in)}</b></span>
+      <span>cached <b style="color:#58a6ff">${qty(total_cached)}</b> (${total_in ? Math.round(100 * total_cached / total_in) : 0}%)</span>
+      <span>uncached <b style="color:#f85149">${qty(total_uncached)}</b></span>
+      <span>output <b>${qty(total_out)}</b></span>
       <span>${unitLabel()} <b style="color:#56d364">${fmtAic(total_aic)}</b></span>
       <span>turns <b>${all.length}</b></span>
       <span>compactions <b style="color:#ff9a3c">${compactCalls.length}</b> (${fmt(compact_total)} tok)</span>
@@ -1286,7 +1311,7 @@ function updateBanner() {
   const tot_req = ss.reduce((s, x) => s + x.n_requests, 0);
   const tot_aic = ss.reduce((s, x) => s + (x.total_aic || 0), 0);
   document.getElementById("banner-stats").textContent =
-    `· ${ss.length} sessions · ${fmt(tot_req)} reqs · ${fmt(tot_in)} input · ${tot_in ? Math.round(100 * tot_cached / tot_in) : 0}% cached · ${fmtCost(tot_aic)} · shared y-max ${fmt(LAST_MAXTOK)}`;
+    `· ${ss.length} sessions · ${fmt(tot_req)} reqs · ${qtyText(tot_in)} input · ${tot_in ? Math.round(100 * tot_cached / tot_in) : 0}% cached · ${fmtCost(tot_aic)} · shared y-max ${qtyText(LAST_MAXTOK)}`;
 }
 
 // Re-express every cost figure on screen in the active unit (AIC or $).
