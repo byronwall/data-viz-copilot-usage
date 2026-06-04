@@ -14,13 +14,41 @@ Using VS Code Insiders, VSCodium, or a portable install? Point the `COPILOT_USAG
 
 ## Visuals
 
+These are the same annotated examples from the in-app **guided tour** (the `? Help` button in the toolbar), which renders a live demo session — one main agent that spawned two sub-agents.
+
 ### Small multiples, one per session
+
+The default view: a grid of cards, one per session, on a shared y-scale so the heaviest hitter fills the frame. Click any card to drill into its detail.
 
 ![](docs/img/small-multiples.png)
 
+### Anatomy of a chart
+
+Each card is one session. The big band plots cumulative input tokens over time; the band below plots per-turn input. Dot size ∝ that turn's input; dot color = cache hit rate.
+
+![](docs/img/chart-anatomy.png)
+
 ### Detailed view, session
 
-![](docs/img/details.png)
+Click any card or row to open the per-turn detail — every LLM call, its reasoning level, input/cached/output, cache-hit bar, and the tools that fired before that turn.
+
+![](docs/img/detail-view.png)
+
+### Table rollup — a day's worth of usage
+
+The `table` toggle swaps the grid for a sortable rollup, one row per thread: model, reasoning level, request and sub-agent counts, input/cached/uncached/output tokens, cost, and duration. Click any column header to re-sort.
+
+![](docs/img/table-rollup.png)
+
+### AIC calendar
+
+The 📅 calendar is a GitHub-style year heatmap of daily spend. Click a day to filter the view to it; the unit toggle switches between AIC credits and dollars.
+
+![](docs/img/calendar.png)
+
+### Colors & marks
+
+![](docs/img/colors-marks.png)
 
 ## Run
 
