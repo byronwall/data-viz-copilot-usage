@@ -702,6 +702,15 @@ def link_search_parents(sessions: list[Session], scan_window_days: int = 30) -> 
 
 # ---------- Series build (for chart + detail pane) ----------
 
+def _top_model(calls: list) -> str:
+    """Most common model id across a list of call dicts (the model a sub-agent ran on)."""
+    counts: dict[str, int] = {}
+    for c in calls:
+        m = c.get("model") or "?"
+        counts[m] = counts.get(m, 0) + 1
+    return max(counts.items(), key=lambda x: x[1])[0] if counts else "?"
+
+
 def build_series(sess: Session) -> tuple[list, list]:
     """Return (main_calls, child_groups). Each call is a dict with cum tokens, tools_before, etc."""
     p = sess.main
@@ -768,7 +777,8 @@ def build_series(sess: Session) -> tuple[list, list]:
         for x in ccalls:
             cc += x["input"]
             x["cum_offset"] = cc
-        kids.append({"label": c["label"], "start_t": start_t, "start_tok": 0, "calls": ccalls})
+        kids.append({"label": c["label"], "start_t": start_t, "start_tok": 0,
+                     "calls": ccalls, "top_model": _top_model(ccalls)})
 
     # Absorb search-children as virtual kids, anchored at the parent's tool_call.ts
     for csid in sess.search_children:
@@ -802,6 +812,7 @@ def build_series(sess: Session) -> tuple[list, list]:
             "calls": flat_calls,
             "is_search_child": True,
             "child_sid": csid,
+            "top_model": _top_model(flat_calls),
         })
 
     return main_calls, kids
@@ -910,15 +921,18 @@ def session_summary(s: Session) -> dict:
                   "cached": c["cached"], "output": c["output"],
                   "dbg": c["debugName"], "compact": c["is_compact"],
                   "err": c.get("is_error", False),
+                  "user": any(t["name"] == "user_message" for t in c["tools_before"]),
                   "aic": with_aic(c), "reasoning": c.get("reasoning", ""),
                   "cum": c["cum"]} for c in main_calls],
         "kids": [{"label": k["label"], "start_t": k["start_t"], "start_tok": k["start_tok"],
                   "is_search_child": k.get("is_search_child", False),
                   "child_sid": k.get("child_sid"),
+                  "top_model": k.get("top_model", "?"),
                   "calls": [{"idx": c["idx"], "t": c["t_rel"], "input": c["input"],
                              "cached": c["cached"], "output": c["output"],
                              "dbg": c["debugName"], "compact": c["is_compact"],
                              "err": c.get("is_error", False),
+                             "user": any(t["name"] == "user_message" for t in c["tools_before"]),
                              "aic": with_aic(c), "reasoning": c.get("reasoning", ""),
                              "cum_offset": c["cum_offset"]} for c in k["calls"]]}
                  for k in kids],
@@ -935,6 +949,7 @@ def session_detail(s: Session) -> dict:
             "output": c["output"], "dbg": c["debugName"], "model": c["model"],
             "ttft": c["ttft"], "compact": c["is_compact"],
             "err": c.get("is_error", False), "err_msg": c.get("error", ""),
+            "user": any(t["name"] == "user_message" for t in c["tools_before"]),
             "aic": _aic_for_req(c, s.models_info), "reasoning": c.get("reasoning", ""),
             "cum": c.get("cum"), "cum_offset": c.get("cum_offset"),
             "tools": [{"n": t["name"], "a": t["args"], "res": t.get("result", ""),
@@ -965,5 +980,6 @@ def session_detail(s: Session) -> dict:
         "kids": [{"label": k["label"], "start_t": k["start_t"], "start_tok": k["start_tok"],
                   "is_search_child": k.get("is_search_child", False),
                   "child_sid": k.get("child_sid"),
+                  "top_model": k.get("top_model", "?"),
                   "calls": [trim_call(c) for c in k["calls"]]} for k in kids],
     }

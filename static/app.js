@@ -4,13 +4,24 @@
 const PALETTE = ["#a371f7", "#3fb950", "#ff7b72", "#f0883e", "#79c0ff", "#ffa657", "#d2a8ff", "#56d364"];
 
 function fmt(n) { return Number(n || 0).toLocaleString(); }
+
+// ---------- Cost unit (global) ----------
+// All cost figures are stored as AIC (Copilot credits). The UNIT toggle re-expresses
+// them as US dollars at the fixed 100 AIC = $1 rate. fmtAic() returns the bare number
+// in the active unit; fmtCost() wraps it with the unit ($-prefix for USD, " AIC" suffix
+// otherwise); unitLabel() is the standalone symbol for column/section headers.
+let UNIT = "aic"; // "aic" | "usd"
+function unitLabel() { return UNIT === "usd" ? "$" : "AIC"; }
+function aicConvert(n) { return UNIT === "usd" ? Number(n || 0) / 100 : Number(n || 0); }
 function fmtAic(n) {
-  n = Number(n || 0);
-  if (n === 0) return "0";
-  if (n < 1000) return n.toFixed(1);  // one decimal, like VS Code's credit badge
-  if (n < 1e6) return (n / 1000).toFixed(1) + "k";
-  return (n / 1e6).toFixed(2) + "M";
+  const v = aicConvert(n);
+  const usd = UNIT === "usd";
+  if (v === 0) return "0";
+  if (Math.abs(v) < 1000) return usd ? v.toFixed(2) : v.toFixed(1);  // one decimal, like VS Code's credit badge
+  if (Math.abs(v) < 1e6) return (v / 1000).toFixed(usd ? 2 : 1) + "k";
+  return (v / 1e6).toFixed(2) + "M";
 }
+function fmtCost(n) { return UNIT === "usd" ? "$" + fmtAic(n) : fmtAic(n) + " AIC"; }
 function pad(x) { return String(x).padStart(2, "0"); }
 function hms(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -75,6 +86,20 @@ function niceCeil(n) {
 function dotFill(c) {
   const cp = c.input > 0 ? c.cached / c.input : 0;
   return cp > 0.7 ? "#58a6ff" : (cp > 0.3 ? "#d29922" : "#f85149");
+}
+// User-message turns are the human's own input — the moments a person actually
+// typed something — so they get a distinct gold star drawn ON TOP of every other
+// marker (see the star pass at the end of renderChart's marker drawing).
+const USER_MSG_COLOR = "#ffd33d";
+function starPoints(cx, cy, R) {
+  const inner = R * 0.45;
+  const pts = [];
+  for (let i = 0; i < 10; i++) {
+    const ang = -Math.PI / 2 + (i * Math.PI) / 5;
+    const rad = i % 2 === 0 ? R : inner;
+    pts.push(`${(cx + rad * Math.cos(ang)).toFixed(1)},${(cy + rad * Math.sin(ang)).toFixed(1)}`);
+  }
+  return pts.join(" ");
 }
 // Reasoning EFFORT level pill (not a token count — VS Code folds reasoning tokens into
 // output). Colored low→high so different reasoning levels are visually comparable at a glance.
@@ -175,6 +200,25 @@ function renderChart(payload, opts) {
     }
   });
 
+  // user-message stars (drawn LAST so they sit on top of every dot/line/diamond).
+  // These are the human's own prompts — the most important points on the chart.
+  const starR = big ? 8.5 : 5.5;
+  const starSW = big ? 1.4 : 1;
+  for (const c of mainNonCompact) {
+    if (!c.user) continue;
+    const x = X(c.t), y = Y(c.cum);
+    const attr = interactive ? ` class="dot" data-idx="P-${c.idx}"` : "";
+    svg += `<polygon points="${starPoints(x, y, starR)}" fill="${USER_MSG_COLOR}" stroke="#0e1116" stroke-width="${starSW}" stroke-linejoin="round"${attr}/>`;
+  }
+  (payload.kids || []).forEach((k, i) => {
+    for (const c of k.calls) {
+      if (!c.user || c.compact || c.err) continue;
+      const x = X(c.t), y = Y(c.cum_offset);
+      const attr = interactive ? ` class="dot" data-idx="K${i}-${c.idx}"` : "";
+      svg += `<polygon points="${starPoints(x, y, starR * 0.85)}" fill="${USER_MSG_COLOR}" stroke="#0e1116" stroke-width="${starSW}" stroke-linejoin="round"${attr}/>`;
+    }
+  });
+
   // header — two lines
   const cp = payload.total_input > 0 ? Math.round(100 * payload.total_cached / payload.total_input) : 0;
   // last_event_ts (epoch ms) is the real end of the chat; fall back to file mtime only if absent.
@@ -189,12 +233,16 @@ function renderChart(payload, opts) {
 
   const fs1 = big ? 12 : 10.5;
   const fs2 = big ? 11 : 9.5;
-  // Row 1: date + total input + cache% + AIC  (the "what did this cost" line)
-  let row1 = `<text x="6" y="${big ? 16 : 14}" fill="#c9d1d9" font-size="${fs1}" font-weight="600">${escapeHtml(date)} · <tspan fill="#c9d1d9">${fmt(payload.total_input)}</tspan> in · <tspan fill="${cp >= 70 ? "#58a6ff" : cp >= 30 ? "#d29922" : "#f85149"}">${cp}%</tspan> cache`;
-  if (payload.total_aic > 0) row1 += ` · <tspan fill="#56d364">${fmtAic(payload.total_aic)} AIC</tspan>`;
-  row1 += `</text>`;
-  // Row 2: turn structure (reqs, subs, compactions, linkage chips)
-  let row2parts = [`${nReq} req`];
+  // Row 1: date + input + uncached — the headline "how big was it" fields.
+  // Kept short so the line fits inside the narrow (360px) grid cards.
+  const hdr_uncached = (payload.total_input || 0) - (payload.total_cached || 0);
+  let row1 = `<text x="6" y="${big ? 16 : 14}" fill="#c9d1d9" font-size="${fs1}" font-weight="600">${escapeHtml(date)} · <tspan fill="#c9d1d9">${fmt(payload.total_input)}</tspan> in · <tspan fill="#f85149">${fmt(hdr_uncached)}</tspan> uncached</text>`;
+  // Row 2: output + cache% + AIC (the rest of the totals) followed by turn structure
+  // (reqs, subs, compactions, linkage chips). Overflow from row 1 lands here so it all fits.
+  let row2parts = [`<tspan fill="#c9d1d9">${fmt(payload.total_output)}</tspan> out`];
+  row2parts.push(`<tspan fill="${cp >= 70 ? "#58a6ff" : cp >= 30 ? "#d29922" : "#f85149"}">${cp}%</tspan> cache`);
+  if (payload.total_aic > 0) row2parts.push(`<tspan fill="#56d364">${fmtCost(payload.total_aic)}</tspan>`);
+  row2parts.push(`${nReq} req`);
   if (nRealKids > 0) row2parts.push(`<tspan fill="#a371f7">${nRealKids} sub</tspan>`);
   if (nSearchKids > 0) row2parts.push(`<tspan fill="#79c0ff">${nSearchKids}🔍</tspan>`);
   if (nCompact > 0) row2parts.push(`<tspan fill="#ff9a3c">${nCompact}◆</tspan>`);
@@ -208,8 +256,15 @@ function renderChart(payload, opts) {
   const subBot = subTop + subH;
   // Only the primary foreground agent — main.jsonl interleaves backgroundTodoAgent,
   // compaction, etc., whose tiny turns would render as misleading drops to ~0.
+  // The primary agent is whichever debugName dominates the non-compaction turns: that's
+  // panel/editAgent for a normal session, but searchSubagentTool for a search-subagent
+  // session opened on its own (so we don't hardcode it and lose the line for those).
   // Also drop failed requests (status:error) — they report 0 input tokens.
-  const mainTurns = (payload.main || []).filter(c => c.dbg === "panel/editAgent" && !c.err);
+  const realMain = (payload.main || []).filter(c => !c.err && !c.compact);
+  const dbgCounts = {};
+  for (const c of realMain) dbgCounts[c.dbg] = (dbgCounts[c.dbg] || 0) + 1;
+  const primaryDbg = Object.entries(dbgCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
+  const mainTurns = (payload.main || []).filter(c => (payload._all_turns || c.dbg === primaryDbg) && !c.err);
   let maxPerTurn = 0;
   for (const c of mainTurns) if (c.input > maxPerTurn) maxPerTurn = c.input;
   // sub-agents each get their own per-turn line, so their turns count toward the y-scale too
@@ -266,17 +321,24 @@ function renderChart(payload, opts) {
     }
   });
 
+  // user-message stars in the per-turn band too (on top of the small dots)
+  const subStarR = big ? 5 : 3.4;
+  for (const c of mainTurns) {
+    if (!c.user) continue;
+    svg += `<polygon points="${starPoints(X(c.t), subY(c.input), subStarR)}" fill="${USER_MSG_COLOR}" stroke="#0e1116" stroke-width="${big ? 1 : 0.7}" stroke-linejoin="round"/>`;
+  }
+  (payload.kids || []).forEach(k => {
+    for (const c of k.calls) {
+      if (!c.user || c.err) continue;
+      svg += `<polygon points="${starPoints(X(c.t), subY(c.input), subStarR)}" fill="${USER_MSG_COLOR}" stroke="#0e1116" stroke-width="${big ? 1 : 0.7}" stroke-linejoin="round"/>`;
+    }
+  });
+
   // Footer: first user message
   const title = escapeHtml((payload.first_user || "(no user msg)").slice(0, big ? 110 : 70));
   svg += `<text x="6" y="${h - 4}" fill="#7d8590" font-size="${big ? 11 : 9}">${title}</text>`;
   svg += "</svg>";
   return svg;
-}
-
-function bar(input, cached) {
-  const cp = input > 0 ? cached / input : 0;
-  const cw = Math.round(cp * 100);
-  return `<span class="bar"><i style="width:${cw}%"></i><i class="uncached" style="width:${100 - cw}%"></i></span>`;
 }
 
 function renderDetail(payload) {
@@ -307,7 +369,7 @@ function renderDetail(payload) {
       <span>cached <b style="color:#58a6ff">${fmt(total_cached)}</b> (${total_in ? Math.round(100 * total_cached / total_in) : 0}%)</span>
       <span>uncached <b style="color:#f85149">${fmt(total_uncached)}</b></span>
       <span>output <b>${fmt(total_out)}</b></span>
-      <span>AIC <b style="color:#56d364">${fmtAic(total_aic)}</b></span>
+      <span>${unitLabel()} <b style="color:#56d364">${fmtAic(total_aic)}</b></span>
       <span>turns <b>${all.length}</b></span>
       <span>compactions <b style="color:#ff9a3c">${compactCalls.length}</b> (${fmt(compact_total)} tok)</span>
       <span>duration <b>${hms(payload.duration_ms)}</b></span>
@@ -316,8 +378,8 @@ function renderDetail(payload) {
   <table class="calls">
     <thead><tr>
       <th>#</th><th>t</th><th>debugName</th><th>rsn</th>
-      <th class="num">input</th><th class="num">cached</th><th>cache%</th>
-      <th class="num">out</th><th class="num">AIC</th><th>tool calls</th>
+      <th class="num">input</th><th class="num">cached</th><th class="num">uncached</th>
+      <th class="num">out</th><th class="num">${unitLabel()}</th><th>tool calls</th>
     </tr></thead><tbody>`;
 
   // build a kid-meta lookup so we can label search-children with a jump link
@@ -331,18 +393,19 @@ function renderDetail(payload) {
       let label;
       if (curGrp.startsWith("K")) {
         const km = kidMeta[curGrp];
+        const modelTag = km && km.top_model && km.top_model !== "?"
+          ? ` · <span class="t-model">${escapeHtml(km.top_model)}</span>` : "";
         if (km && km.is_search_child) {
           // Render inline, identical structure to a regular sub-agent section — no jump.
-          label = `<span style="color:#79c0ff">🔍 search-subagent</span> · ${escapeHtml(km.child_sid ? km.child_sid.slice(0, 8) : "")}`;
+          label = `<span style="color:#79c0ff">🔍 search-subagent</span> · ${escapeHtml(km.child_sid ? km.child_sid.slice(0, 8) : "")}${modelTag}`;
         } else {
-          label = `▸ sub-agent: ${escapeHtml(c._label || curGrp)}`;
+          label = `▸ sub-agent: ${escapeHtml(c._label || curGrp)}${modelTag}`;
         }
       } else {
         label = `▸ foreground (panel/editAgent)`;
       }
       html += `<tr class="kid-section"><td colspan="10">${label}</td></tr>`;
     }
-    const cp = c.input > 0 ? c.cached / c.input : 0;
     const idx = `${c._grp}-${c.idx}`;
     const dbgClass = c.compact ? "dbg compact" : "dbg";
     const compactClass = c.compact ? "compact-row" : "";
@@ -359,7 +422,7 @@ function renderDetail(payload) {
       <td>${reasoningBadge(c.reasoning)}</td>
       <td class="num">${fmt(c.input)}</td>
       <td class="num cached">${fmt(c.cached)}</td>
-      <td>${c.err ? `<span style="color:#f85149">${escapeHtml((c.err_msg || "failed").slice(0, 48))}</span>` : `${bar(c.input, c.cached)} ${Math.round(cp * 100)}%`}</td>
+      <td class="num">${c.err ? `<span style="color:#f85149">${escapeHtml((c.err_msg || "failed").slice(0, 48))}</span>` : `<span class="uncached">${fmt(c.input - c.cached)}</span>`}</td>
       <td class="num">${fmt(c.output)}</td>
       <td class="num aic">${c.aic ? fmtAic(c.aic) : "<span style='color:#444'>—</span>"}</td>
       <td>${toolSummary}</td>
@@ -523,6 +586,7 @@ async function openModal(sid, maxTok) {
   chartHolder.innerHTML = renderChart(payload, { w: 720, h: 540, maxTok: modalMaxTok, big: true, interactive: true });
   right.innerHTML = renderDetail(payload);
   document.getElementById("modalLegend").innerHTML = `
+    <span><span class="star"></span>user message</span>
     <span><span class="dot" style="background:#58a6ff"></span>foreground</span>
     <span><span class="dot" style="background:#a371f7"></span>sub-agent (dashed)</span>
     <span><span class="dia"></span>compaction</span>
@@ -531,6 +595,15 @@ async function openModal(sid, maxTok) {
     <span class="muted">click a dot or row to select</span>`;
   wireSelect(chartHolder.querySelector("svg"), right);
   wireExpand(right);
+  stickCallsHeader(right);
+}
+
+// The per-turn table's column header sticks below the (also-sticky) modal-header.
+// Its height is dynamic (prompt length, wrapped totals), so measure it and expose
+// the offset as a CSS var the th's `top` reads.
+function stickCallsHeader(scrollEl) {
+  const hdr = scrollEl.querySelector(".modal-header");
+  if (hdr) scrollEl.style.setProperty("--calls-th-top", hdr.offsetHeight + "px");
 }
 
 function closeModal() {
@@ -539,7 +612,173 @@ function closeModal() {
 }
 document.getElementById("closeBtn").addEventListener("click", closeModal);
 document.getElementById("modal").addEventListener("click", e => { if (e.target.id === "modal") closeModal(); });
-document.addEventListener("keydown", e => { if (e.key === "Escape") { closeModal(); closeCal(); } });
+document.addEventListener("keydown", e => { if (e.key === "Escape") { closeModal(); closeCal(); closeHelp(); } });
+
+// ---------- Help / guided tour ----------
+// A self-contained demo session (one main agent + one sub-agent + one 🔍 search-subagent),
+// rendered with the real renderChart/renderDetail so the explanation always matches the UI.
+// Fixed timestamps keep the demo deterministic.
+const DEMO_END_TS = new Date("2026-06-04T14:32:00").getTime();
+function _demoTool(n, a, res, d) { return { n, a, res: res || "", d: d || 0, s: "success", t: 0 }; }
+
+function buildDemoPayload() {
+  const main = [
+    { t: 0, input: 2000, cached: 0, output: 420, dbg: "panel/editAgent", reasoning: "medium", aic: 0.6,
+      tools: [_demoTool("user_message", "Add JWT auth to the API and write tests for the middleware"),
+              _demoTool("readFile", '{"filePath":"src/server.ts"}', "import express from 'express'\nconst app = express()\n// ...route registration", 11)] },
+    { t: 42000, input: 7600, cached: 1800, output: 610, dbg: "panel/editAgent", reasoning: "medium", aic: 1.8,
+      tools: [_demoTool("readFile", '{"filePath":"src/routes/api.ts"}', "router.get('/users', listUsers)\nrouter.post('/users', createUser)", 9),
+              _demoTool("editFile", '{"filePath":"src/middleware/auth.ts"}', "+ export function requireAuth(req, res, next) { ... }", 34)] },
+    { t: 118000, input: 16800, cached: 9200, output: 880, dbg: "panel/editAgent", reasoning: "high", aic: 4.2,
+      tools: [_demoTool("runInTerminal", '{"command":"npm test"}', "Tests:  3 passed, 2 failed\n  ✕ rejects expired tokens", 2400)] },
+    { t: 178000, input: 28000, cached: 0, output: 0, dbg: "compaction", reasoning: "", compact: true, aic: 2.1, tools: [] },
+    { t: 236000, input: 11200, cached: 8400, output: 540, dbg: "panel/editAgent", reasoning: "medium", aic: 2.0,
+      tools: [_demoTool("editFile", '{"filePath":"test/auth.test.ts"}', "+ 4 new cases covering expiry & malformed tokens", 18)] },
+    { t: 318000, input: 14600, cached: 12100, output: 720, dbg: "panel/editAgent", reasoning: "medium", aic: 2.8,
+      tools: [_demoTool("runInTerminal", '{"command":"npm test"}', "Tests:  9 passed, 0 failed", 2100)] },
+  ];
+  // cumulative input for the main line
+  let cum = 0;
+  main.forEach((c, i) => { cum += c.input; c.cum = cum; c.idx = i; c.err = false; c.user = (c.tools || []).some(t => t.n === "user_message"); });
+
+  const kid1Calls = [
+    { t: 94000, input: 4800, cached: 0, output: 300, dbg: "subagent", reasoning: "low", aic: 1.1,
+      tools: [_demoTool("user_message", "Locate the auth middleware and the User model"), _demoTool("grepSearch", '{"query":"requireAuth|User model"}', "5 matches across 3 files", 40)] },
+    { t: 138000, input: 8600, cached: 3900, output: 410, dbg: "subagent", reasoning: "low", aic: 1.9,
+      tools: [_demoTool("readFile", '{"filePath":"src/models/user.ts"}', "export interface User { id, email, hash }", 8)] },
+    { t: 172000, input: 6400, cached: 4700, output: 220, dbg: "subagent", reasoning: "low", aic: 1.4, tools: [] },
+  ];
+  const kid2Calls = [
+    { t: 204000, input: 3800, cached: 0, output: 260, dbg: "searchSubagentTool", reasoning: "minimal", aic: 0.9,
+      tools: [_demoTool("user_message", "Find existing error-handling patterns in the codebase"), _demoTool("semanticSearch", '{"query":"error handling middleware express"}', "3 relevant files", 120)] },
+    { t: 232000, input: 5600, cached: 2900, output: 340, dbg: "searchSubagentTool", reasoning: "minimal", aic: 1.3, tools: [] },
+  ];
+  [kid1Calls, kid2Calls].forEach(cl => { let c = 0; cl.forEach((x, i) => { c += x.input; x.cum_offset = c; x.idx = i; x.err = false; x.user = (x.tools || []).some(t => t.n === "user_message"); }); });
+
+  const all = main.concat(kid1Calls, kid2Calls);
+  const sum = f => all.reduce((s, c) => s + (f(c) || 0), 0);
+  return {
+    sid: "demo-9c1f4a2b", workspace: "my-app", mtime: DEMO_END_TS / 1000, last_event_ts: DEMO_END_TS,
+    first_user: "Add JWT auth to the API and write tests for the middleware",
+    top_model: "claude-sonnet-4-6", reasoning: "medium", parent_sid: null, duration_ms: 318000,
+    total_input: sum(c => c.input), total_cached: sum(c => c.cached), total_output: sum(c => c.output),
+    total_aic: sum(c => c.aic), n_compactions: 1, n_requests: all.length,
+    main,
+    kids: [
+      { label: "explore-codebase: locate auth & user model", start_t: 88000, start_tok: 0,
+        is_search_child: false, child_sid: null, top_model: "claude-sonnet-4-6", calls: kid1Calls },
+      { label: "🔍 search: existing error-handling patterns", start_t: 198000, start_tok: 0,
+        is_search_child: true, child_sid: "demo-search-3e7d", top_model: "claude-haiku-4-5", calls: kid2Calls },
+    ],
+  };
+}
+
+// Pins are placed in the chart's own 720×540 coordinate space (the demo svg is rendered
+// at exactly that pixel size), so positions line up with the rendered features.
+const HELP_PINS = [
+  { n: 1, x: 430, y: 13, title: "Cost summary", body: "Date · total input tokens · cache hit % · session cost. Cost shows in AIC credits or $ (toggle in the toolbar)." },
+  { n: 2, x: 240, y: 32, title: "Turn structure", body: "Request count, <b>sub</b>-agents, <b>🔍</b> search-subagents, and <b>◆</b> compactions for this session." },
+  { n: 3, x: 470, y: 150, title: "Foreground line", body: "Cumulative input tokens for the main agent. Steeper = tokens piling up fast (often a large or uncached turn)." },
+  { n: 4, x: 297, y: 289, title: "Dot = one request", body: "Dot <b>size</b> ∝ that turn's input; dot <b>color</b> = cache hit rate (blue warm → amber → red cold)." },
+  { n: 5, x: 335, y: 331, title: "Sub-agent (dashed)", body: "A spawned sub-agent gets its own dashed line and color, tracking its own running token total." },
+  { n: 6, x: 516, y: 344, title: "🔍 Search-subagent", body: "Search sub-agents are blue & dashed; the small ring marks where it was spawned. Click through to its own session." },
+  { n: 7, x: 380, y: 172, title: "◆ Compaction", body: "An orange diamond marks where the context was summarized to free up tokens — note the jump in cumulative input." },
+  { n: 8, x: 300, y: 446, title: "Per-turn input band", body: "The lower band shows each turn's input in isolation (not cumulative), so you can spot the spikes that drove cost." },
+  { n: 9, x: 251, y: 358, title: "⭐ User message", body: "A gold star marks a turn the <b>human kicked off</b> by typing a prompt. Stars are drawn on top of every other marker so the human's inputs always stand out — scan them to see the back-and-forth that shaped the session." },
+];
+
+const HELP_FEATURES = [
+  { name: "Date range", key: "◀ ▶", desc: "Set an explicit start/end, or step the window backward/forward by its current span." },
+  { name: "Quick ranges", key: "1h–90d", desc: "Jump to the last N hours/days ending now. Refresh re-anchors a quick range to the current time." },
+  { name: "AIC calendar", key: "📅", desc: "A year heatmap of daily spend. Click a day to filter to it; switches between AIC and $ with the unit toggle." },
+  { name: "Sort & limit", desc: "Order sessions by input, cost, recency, requests, or duration. Top-N and a min-token floor trim the list." },
+  { name: "Charts ↔ Table", desc: "Same sessions as SVG small-multiples or a sortable rollup table. Click a column header to re-sort the table." },
+  { name: "Combine sub-agents", desc: "Fold sub-agent tokens into their parent (default), or split each sub-agent out as its own independent row/card." },
+  { name: "AIC ↔ $", desc: "Show cost as Copilot AIC credits or US dollars, at the fixed 100 AIC = $1 rate. Applies everywhere at once." },
+  { name: "Detail modal", desc: "Click a card/row to open per-turn detail. Click a chart dot or table row to highlight the matching turn." },
+  { name: "Shareable URL", desc: "Every control, the open calendar, and the open session are encoded in the URL — copy it to share the exact view." },
+];
+
+const HELP_COLORS = [
+  { mark: `<span class="hc-star"></span>`, txt: "<b>⭐ User message</b> — a human prompt; gold star, always drawn on top" },
+  { mark: `<span class="hc-swatch" style="background:#58a6ff"></span>`, txt: "<b>Foreground</b> agent (panel/editAgent) — solid line" },
+  { mark: `<span class="hc-line" style="border-color:#a371f7"></span>`, txt: "<b>Sub-agent</b> — dashed, one color each" },
+  { mark: `<span class="hc-line" style="border-color:#79c0ff;border-top-style:dashed"></span>`, txt: "<b>🔍 search-subagent</b> — dashed blue + spawn ring" },
+  { mark: `<span class="hc-dia"></span>`, txt: "<b>Compaction</b> — context was summarized" },
+  { mark: `<span class="hc-swatch" style="background:#58a6ff"></span>`, txt: "<b>Warm cache</b> — &gt;70% of input was cached" },
+  { mark: `<span class="hc-swatch" style="background:#d29922"></span>`, txt: "<b>Medium cache</b> — 30–70% cached" },
+  { mark: `<span class="hc-swatch" style="background:#f85149"></span>`, txt: "<b>Cold cache</b> — &lt;30% cached (most expensive)" },
+  { mark: `<span class="rsn" style="--rc:#d29922">med</span>`, txt: "<b>Reasoning effort</b> pill — requested level, not a token count" },
+];
+
+let HELP_OPEN = false;
+
+function renderHelp() {
+  const payload = buildDemoPayload();
+
+  // Annotated chart (rendered at native 720×540 so pins align).
+  const chart = document.getElementById("helpChart");
+  let sessionPeak = 0;
+  for (const c of payload.main) if (c.cum > sessionPeak) sessionPeak = c.cum;
+  for (const k of payload.kids) for (const c of k.calls) if (c.cum_offset > sessionPeak) sessionPeak = c.cum_offset;
+  chart.innerHTML = renderChart(payload, { w: 720, h: 540, maxTok: niceCeil(sessionPeak || 1000), big: true });
+  chart.querySelectorAll(".help-pin").forEach(p => p.remove());
+  for (const p of HELP_PINS) {
+    const pin = document.createElement("div");
+    pin.className = "help-pin"; pin.dataset.n = p.n; pin.textContent = p.n;
+    pin.style.left = p.x + "px"; pin.style.top = p.y + "px";
+    pin.title = p.title;
+    chart.appendChild(pin);
+  }
+
+  // Numbered legend, hover-linked to the pins both ways.
+  const list = document.getElementById("helpPinsList");
+  list.innerHTML = HELP_PINS.map(p =>
+    `<li data-n="${p.n}"><span class="pin-n">${p.n}</span><span class="pin-txt"><b>${escapeHtml(p.title)}</b> — ${p.body}</span></li>`
+  ).join("");
+  const setActive = (n, on) => {
+    chart.querySelector(`.help-pin[data-n="${n}"]`)?.classList.toggle("active", on);
+    list.querySelector(`li[data-n="${n}"]`)?.classList.toggle("active", on);
+  };
+  list.querySelectorAll("li").forEach(li => {
+    li.addEventListener("mouseenter", () => setActive(li.dataset.n, true));
+    li.addEventListener("mouseleave", () => setActive(li.dataset.n, false));
+  });
+  chart.querySelectorAll(".help-pin").forEach(pin => {
+    pin.addEventListener("mouseenter", () => setActive(pin.dataset.n, true));
+    pin.addEventListener("mouseleave", () => setActive(pin.dataset.n, false));
+  });
+
+  // Live detail table — reuse the real renderer + interactions.
+  const detail = document.getElementById("helpDetail");
+  detail.innerHTML = renderDetail(payload);
+  wireExpand(detail);
+
+  // Static reference cards.
+  document.getElementById("helpFeatures").innerHTML = HELP_FEATURES.map(f =>
+    `<div class="help-feature"><div class="hf-name">${escapeHtml(f.name)}${f.key ? `<span class="hf-key">${escapeHtml(f.key)}</span>` : ""}</div><div class="hf-desc">${f.desc}</div></div>`
+  ).join("");
+  document.getElementById("helpColors").innerHTML = HELP_COLORS.map(c =>
+    `<div class="help-color"><span class="hc-mark">${c.mark}</span><span class="hc-txt">${c.txt}</span></div>`
+  ).join("");
+}
+
+function openHelp() {
+  if (HELP_OPEN) return;
+  HELP_OPEN = true;
+  renderHelp();
+  document.getElementById("helpModal").classList.add("open");
+  syncUrl(true);
+}
+function closeHelp() {
+  if (!HELP_OPEN) return;
+  HELP_OPEN = false;
+  document.getElementById("helpModal").classList.remove("open");
+  syncUrl(true);
+}
+document.getElementById("helpBtn").addEventListener("click", openHelp);
+document.getElementById("helpCloseBtn").addEventListener("click", closeHelp);
+document.getElementById("helpModal").addEventListener("click", e => { if (e.target.id === "helpModal") closeHelp(); });
 
 // ---------- Date range controls ----------
 const startEl = document.getElementById("start_date");
@@ -619,7 +858,7 @@ endEl.addEventListener("change", () => { RANGE_PINNED = false; updateRangeInfo()
 // shared link) restores the exact view. Pinned "last N hours" windows persist as
 // hours=N (re-anchored to now on load); explicit windows persist as start/end
 // unix timestamps. Params at their defaults are omitted to keep URLs clean.
-const URL_DEFAULTS = { hours: 24, sort: "total_input", limit: "50", min_tokens: "0", view: "charts" };
+const URL_DEFAULTS = { hours: 24, sort: "total_input", limit: "50", min_tokens: "0", view: "charts", combine: "1", unit: "aic" };
 let SUPPRESS_URL = false; // true while restoring state FROM the URL
 
 function syncUrl(push = false) {
@@ -640,9 +879,12 @@ function syncUrl(push = false) {
   const minTok = document.getElementById("min_tokens").value;
   if (minTok !== URL_DEFAULTS.min_tokens) p.set("min_tokens", minTok);
   if (VIEW !== URL_DEFAULTS.view) p.set("view", VIEW);
+  if (!COMBINE) p.set("combine", "0");
+  if (UNIT !== URL_DEFAULTS.unit) p.set("unit", UNIT);
   if (CAL_SELECTED) p.set("day", CAL_SELECTED);
   if (!calPop.hidden) { p.set("cal", "1"); p.set("cal_year", String(CAL_YEAR)); }
   if (MODAL_SID) p.set("session", MODAL_SID);
+  if (HELP_OPEN) p.set("help", "1");
   const qs = p.toString();
   const url = qs ? `${location.pathname}?${qs}` : location.pathname;
   if (url === location.pathname + location.search) return;
@@ -668,6 +910,8 @@ function applyUrlState() {
     document.getElementById("limit").value = p.get("limit") || URL_DEFAULTS.limit;
     document.getElementById("min_tokens").value = p.get("min_tokens") || URL_DEFAULTS.min_tokens;
     VIEW = p.get("view") === "table" ? "table" : "charts";
+    COMBINE = p.get("combine") !== "0";
+    UNIT = p.get("unit") === "usd" ? "usd" : "aic";
     CAL_SELECTED = p.get("day") || null;
     const calYear = Number(p.get("cal_year"));
     if (calYear) CAL_YEAR = calYear;
@@ -675,6 +919,7 @@ function applyUrlState() {
     const sid = p.get("session");
     if (sid && sid !== MODAL_SID) openModal(sid);
     else if (!sid && MODAL_SID) closeModal();
+    if (p.get("help") === "1") openHelp(); else closeHelp();
   } finally {
     SUPPRESS_URL = false;
   }
@@ -694,7 +939,11 @@ let CAL_SELECTED = null;                 // "YYYY-MM-DD" of the day currently fi
 function calKey(y, m, d) { return `${y}-${pad(m + 1)}-${pad(d)}`; }
 
 // Cells always use N.nk so small days don't render with more digits than big ones.
-function fmtAicCell(v) { return (v / 1000).toFixed(1) + "k"; }
+function fmtAicCell(v) {
+  const x = aicConvert(v);
+  if (UNIT === "usd") return "$" + (x >= 1000 ? (x / 1000).toFixed(1) + "k" : Math.round(x));
+  return (x / 1000).toFixed(1) + "k";
+}
 
 // GitHub-contribution-style green ramp; intensity ∝ sqrt(v/max) so mid days stay visible.
 function calHeat(v, max) {
@@ -716,7 +965,7 @@ function calCell(y, m, d, max, today) {
   if (!v) {
     return `<div class="${cls.join(" ")}" style="background:${bg}"><span class="d">${d}</span></div>`;
   }
-  const title = `${MONTH_NAMES[m]} ${d}, ${y} · ${fmtAic(v)} AIC`;
+  const title = `${MONTH_NAMES[m]} ${d}, ${y} · ${fmtCost(v)}`;
   return `<div class="${cls.join(" ")}" data-date="${key}" title="${title}" style="background:${bg}">` +
     `<span class="d">${d}</span>` +
     `<span class="v" style="color:${fg}">${fmtAicCell(v)}</span>` +
@@ -734,7 +983,7 @@ function renderCalendar() {
     if (v > max) max = v;
   }
   document.getElementById("calYear").textContent = String(y);
-  document.getElementById("calInfo").textContent = yearTotal ? `· ${fmtAic(yearTotal)} AIC this year` : "· no AIC this year";
+  document.getElementById("calInfo").textContent = yearTotal ? `· ${fmtCost(yearTotal)} this year` : `· no ${unitLabel()} this year`;
 
   // month-per-row needs ~26px × 31 cells + label; below that fall back to 7-day weeks
   const wide = el.clientWidth >= 860;
@@ -855,16 +1104,11 @@ async function loadSessions() {
   CURRENT_MAX_TOK = data.max_tok || 1000;
   const maxTok = niceCeil(CURRENT_MAX_TOK);
 
-  const tot_in = data.sessions.reduce((s, x) => s + x.total_input, 0);
-  const tot_cached = data.sessions.reduce((s, x) => s + x.total_cached, 0);
-  const tot_req = data.sessions.reduce((s, x) => s + x.n_requests, 0);
-  const tot_aic = data.sessions.reduce((s, x) => s + (x.total_aic || 0), 0);
-  document.getElementById("banner-stats").textContent =
-    `· ${data.sessions.length} sessions · ${fmt(tot_req)} reqs · ${fmt(tot_in)} input · ${tot_in ? Math.round(100 * tot_cached / tot_in) : 0}% cached · ${fmtAic(tot_aic)} AIC · shared y-max ${fmt(maxTok)}`;
   document.getElementById("took").textContent = `(${data.took_ms} ms scan)`;
 
   LAST_SESSIONS = data.sessions;
   LAST_MAXTOK = maxTok;
+  updateBanner();
 
   if (data.sessions.length === 0) {
     grid.innerHTML = "";
@@ -882,15 +1126,89 @@ async function loadSessions() {
 // Two renderings of the same session list (the "threads"): the SVG small-multiples
 // grid, and a tabular rollup. Both route a row/card click to the same detail modal.
 let LAST_SESSIONS = [];
+let LAST_DISPLAY = [];     // what's actually on screen (combined or expanded)
 let LAST_MAXTOK = 1000;
 let VIEW = "charts";
+// true → sub-agent (sub-agent + search-subagent) tokens stay folded into their parent (default).
+// false → each sub-agent is split out as its own row/card, with its tokens removed from the parent.
+let COMBINE = true;
 // Column sort for the table view. key=null → keep the server's sort (the controls' sort key).
 let TABLE_SORT = { key: null, dir: -1 };
+
+// Sum a sub-agent's per-turn tokens (the contribution it added to its parent's totals).
+function kidTotals(k) {
+  let input = 0, cached = 0, output = 0, aic = 0, nc = 0;
+  for (const c of k.calls) {
+    input += c.input || 0; cached += c.cached || 0; output += c.output || 0;
+    aic += c.aic || 0; if (c.compact) nc++;
+  }
+  return { input, cached, output, aic, n: k.calls.length, nc };
+}
+
+function kidReasoning(k) {
+  return [...new Set(k.calls.map(c => c.reasoning).filter(Boolean))].join("·");
+}
+
+// Expand each session into (parent-minus-its-sub-agents) + one standalone entry per sub-agent.
+// Synthetic entries carry every field the table/chart renderers read, plus `_modal_sid` so a
+// click routes to a real session detail (the search-subagent's own session, else the parent).
+function expandSessions(sessions) {
+  const out = [];
+  for (const s of sessions) {
+    const kids = s.kids || [];
+    if (!kids.length) { out.push({ ...s, _modal_sid: s.sid, n_subs: 0 }); continue; }
+    let ki = 0, kc = 0, ko = 0, ka = 0, kn = 0, knc = 0;
+    for (const k of kids) {
+      const t = kidTotals(k);
+      ki += t.input; kc += t.cached; ko += t.output; ka += t.aic; kn += t.n; knc += t.nc;
+    }
+    out.push({
+      ...s,
+      total_input: s.total_input - ki,
+      total_cached: s.total_cached - kc,
+      total_output: s.total_output - ko,
+      total_aic: (s.total_aic || 0) - ka,
+      n_requests: s.n_requests - kn,
+      n_compactions: Math.max(0, (s.n_compactions || 0) - knc),
+      kids: [],
+      n_subs: kids.length,
+      _modal_sid: s.sid,
+    });
+    kids.forEach((k, i) => {
+      const t = kidTotals(k);
+      const ts = k.calls.map(c => c.t);
+      const dur = ts.length ? Math.max(...ts) - Math.min(...ts) : 0;
+      out.push({
+        sid: `${s.sid}::K${i}`,
+        _modal_sid: (k.is_search_child && k.child_sid) ? k.child_sid : s.sid,
+        _is_subagent: true, _all_turns: true, is_search_child: k.is_search_child,
+        workspace: s.workspace,
+        first_user: k.label,
+        last_event_ts: s.last_event_ts, mtime: s.mtime,
+        top_model: k.top_model || "?",
+        reasoning: kidReasoning(k),
+        total_input: t.input, total_cached: t.cached, total_output: t.output,
+        total_aic: t.aic, n_requests: t.n, n_compactions: t.nc,
+        duration_ms: dur,
+        // chart payload: the sub-agent's own turns become the "main" line (cum from cum_offset)
+        main: k.calls.map(c => ({ ...c, cum: c.cum_offset })),
+        kids: [],
+      });
+    });
+  }
+  return out;
+}
+
+function displaySessions() {
+  return COMBINE
+    ? LAST_SESSIONS.map(s => ({ ...s, _modal_sid: s.sid, n_subs: (s.kids || []).length }))
+    : expandSessions(LAST_SESSIONS);
+}
 
 function renderCards(sessions, maxTok) {
   const grid = document.getElementById("grid");
   grid.innerHTML = sessions.map(s =>
-    `<div class="card" data-sid="${escapeHtml(s.sid)}">${renderChart(s, { maxTok })}</div>`
+    `<div class="card" data-sid="${escapeHtml(s._modal_sid || s.sid)}">${renderChart(s, { maxTok })}</div>`
   ).join("");
   grid.querySelectorAll(".card").forEach(card => {
     card.addEventListener("click", () => openModal(card.dataset.sid, maxTok));
@@ -899,7 +1217,7 @@ function renderCards(sessions, maxTok) {
 
 // One row per thread (session). Each column declares how to read its sort value and
 // how to render its cell, so header-click sorting and rendering stay in lockstep.
-const cachePct = s => (s.total_input ? s.total_cached / s.total_input : 0);
+const uncachedTok = s => (s.total_input || 0) - (s.total_cached || 0);
 const TABLE_COLS = [
   { key: "time", label: "time", num: false, get: s => s.last_event_ts || s.mtime * 1000,
     render: s => `<span class="t-time">${new Date(s.last_event_ts || s.mtime * 1000).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>` },
@@ -911,12 +1229,14 @@ const TABLE_COLS = [
     render: s => `<span class="t-thread">${escapeHtml(s.first_user || "(no user message)")}</span>` },
   { key: "n_requests", label: "req", num: true, get: s => s.n_requests || 0,
     render: s => fmt(s.n_requests) },
+  { key: "n_subs", label: "subs", num: true, get: s => s.n_subs || 0,
+    render: s => s.n_subs ? fmt(s.n_subs) : `<span style="color:#444">—</span>` },
   { key: "total_input", label: "input", num: true, get: s => s.total_input || 0,
     render: s => fmt(s.total_input) },
   { key: "total_cached", label: "cached", num: true, get: s => s.total_cached || 0,
-    render: s => `<span class="num cached">${fmt(s.total_cached)}</span>` },
-  { key: "cache_pct", label: "cache%", num: true, get: cachePct,
-    render: s => `<span class="t-cache">${bar(s.total_input, s.total_cached)} ${Math.round(100 * cachePct(s))}%</span>` },
+    render: s => `<span class="num t-cached-sub">${fmt(s.total_cached)}</span>` },
+  { key: "uncached", label: "uncached", num: true, get: uncachedTok,
+    render: s => `<span class="num uncached">${fmt(uncachedTok(s))}</span>` },
   { key: "total_output", label: "output", num: true, get: s => s.total_output || 0,
     render: s => fmt(s.total_output) },
   { key: "total_aic", label: "AIC", num: true, get: s => s.total_aic || 0,
@@ -937,11 +1257,12 @@ function renderTable(sessions, maxTok) {
   }
   const thead = TABLE_COLS.map(c => {
     const arrow = TABLE_SORT.key === c.key ? (TABLE_SORT.dir > 0 ? " ▲" : " ▼") : "";
-    return `<th data-key="${c.key}" class="${c.num ? "num" : ""}">${escapeHtml(c.label)}${arrow}</th>`;
+    const label = c.key === "total_aic" ? unitLabel() : c.label;
+    return `<th data-key="${c.key}" class="${c.num ? "num" : ""}">${escapeHtml(label)}${arrow}</th>`;
   }).join("");
   const body = rows.map(s => {
     const tds = TABLE_COLS.map(c => `<td class="${c.num ? "num" : ""}">${c.render(s)}</td>`).join("");
-    return `<tr class="trow" data-sid="${escapeHtml(s.sid)}">${tds}</tr>`;
+    return `<tr class="trow${s._is_subagent ? " subagent-row" : ""}" data-sid="${escapeHtml(s._modal_sid || s.sid)}">${tds}</tr>`;
   }).join("");
   wrap.innerHTML = `<table class="rollup"><thead><tr>${thead}</tr></thead><tbody>${body}</tbody></table>`;
   wrap.querySelectorAll("tr.trow").forEach(r => {
@@ -952,19 +1273,45 @@ function renderTable(sessions, maxTok) {
       const k = th.dataset.key;
       if (TABLE_SORT.key === k) TABLE_SORT.dir = -TABLE_SORT.dir;
       else { TABLE_SORT.key = k; TABLE_SORT.dir = -1; }
-      renderTable(LAST_SESSIONS, LAST_MAXTOK);
+      renderTable(LAST_DISPLAY, LAST_MAXTOK);
     });
   });
+}
+
+// Banner totals (unit-aware) — recomputed on load and on unit toggle.
+function updateBanner() {
+  const ss = LAST_SESSIONS || [];
+  const tot_in = ss.reduce((s, x) => s + x.total_input, 0);
+  const tot_cached = ss.reduce((s, x) => s + x.total_cached, 0);
+  const tot_req = ss.reduce((s, x) => s + x.n_requests, 0);
+  const tot_aic = ss.reduce((s, x) => s + (x.total_aic || 0), 0);
+  document.getElementById("banner-stats").textContent =
+    `· ${ss.length} sessions · ${fmt(tot_req)} reqs · ${fmt(tot_in)} input · ${tot_in ? Math.round(100 * tot_cached / tot_in) : 0}% cached · ${fmtCost(tot_aic)} · shared y-max ${fmt(LAST_MAXTOK)}`;
+}
+
+// Re-express every cost figure on screen in the active unit (AIC or $).
+function applyUnit() {
+  document.querySelectorAll(".unit-btn").forEach(b => b.classList.toggle("active", b.dataset.unit === UNIT));
+  const calBtn = document.getElementById("calTrigger");
+  if (calBtn) calBtn.textContent = `📅 ${unitLabel()}`;
+  updateBanner();
+  if (LAST_SESSIONS.length) applyView();
+  if (!calPop.hidden) renderCalendar();
+  if (MODAL_SID) openModal(MODAL_SID);
 }
 
 function applyView() {
   const charts = VIEW !== "table";
   document.querySelectorAll(".view-btn").forEach(b => b.classList.toggle("active", (b.dataset.view === "table") !== charts));
+  document.querySelectorAll(".combine-btn").forEach(b => b.classList.toggle("active", (b.dataset.combine === "1") === COMBINE));
+  document.querySelectorAll(".unit-btn").forEach(b => b.classList.toggle("active", b.dataset.unit === UNIT));
+  document.getElementById("calTrigger").textContent = `📅 ${unitLabel()}`;
   document.getElementById("grid").hidden = !charts;
   document.getElementById("tableWrap").hidden = charts;
   if (!LAST_SESSIONS.length) return;
-  if (charts) renderCards(LAST_SESSIONS, LAST_MAXTOK);
-  else renderTable(LAST_SESSIONS, LAST_MAXTOK);
+  LAST_DISPLAY = displaySessions();
+  if (charts) renderCards(LAST_DISPLAY, LAST_MAXTOK);
+  else renderTable(LAST_DISPLAY, LAST_MAXTOK);
 }
 
 document.querySelectorAll(".view-btn").forEach(b => {
@@ -973,6 +1320,25 @@ document.querySelectorAll(".view-btn").forEach(b => {
     VIEW = b.dataset.view;
     syncUrl();
     applyView();
+  });
+});
+
+document.querySelectorAll(".combine-btn").forEach(b => {
+  b.addEventListener("click", () => {
+    const v = b.dataset.combine === "1";
+    if (COMBINE === v) return;
+    COMBINE = v;
+    syncUrl();
+    applyView();
+  });
+});
+
+document.querySelectorAll(".unit-btn").forEach(b => {
+  b.addEventListener("click", () => {
+    if (UNIT === b.dataset.unit) return;
+    UNIT = b.dataset.unit;
+    syncUrl();
+    applyUnit();
   });
 });
 

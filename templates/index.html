@@ -39,12 +39,23 @@
     <input type="number" name="min_tokens" id="min_tokens" value="0" step="any" title="Min tokens" placeholder="min tok" style="width:84px;">
     <button type="submit" class="primary">Refresh</button>
     <span id="took" class="muted small"></span>
+    <span class="vsep"></span>
+    <button type="button" id="helpBtn" class="help-btn" title="Guided tour — what am I looking at?">? Help</button>
   </form>
   <div class="view-toggle" id="viewToggle">
     <button type="button" class="view-btn active" data-view="charts">charts</button>
     <button type="button" class="view-btn" data-view="table">table</button>
   </div>
+  <div class="view-toggle" id="combineToggle" title="How sub-agents (sub-agents + 🔍 search-subagents) are counted">
+    <button type="button" class="combine-btn active" data-combine="1">combine sub-agents into their parent (default)</button>
+    <button type="button" class="combine-btn" data-combine="0">show sub-agents as independent calls</button>
+  </div>
+  <div class="view-toggle" id="unitToggle" title="Show cost as AIC credits or US dollars (100 AIC = $1)">
+    <button type="button" class="unit-btn active" data-unit="aic">AIC</button>
+    <button type="button" class="unit-btn" data-unit="usd">$</button>
+  </div>
   <div class="legend">
+    <span><span class="star"></span>user message</span>
     <span><span class="dot" style="background:#58a6ff"></span>foreground (panel/editAgent)</span>
     <span><span class="dot" style="background:#a371f7"></span>sub-agent</span>
     <span><span class="dot" style="background:#79c0ff"></span>🔍 search-subagent</span>
@@ -79,6 +90,41 @@
       <div id="modalLegend" class="modal-legend"></div>
     </div>
     <div class="modal-right" id="modalRight"></div>
+  </div>
+</div>
+
+<div class="modal help-modal" id="helpModal">
+  <button class="modal-close" id="helpCloseBtn">✕ close</button>
+  <div class="help-body">
+    <div class="help-head">
+      <h2>What am I looking at?</h2>
+      <p class="muted">This viewer charts your Copilot chat sessions — every request, sub-agent, and compaction — so you can see where tokens and cost (AIC credits) go. Below is a <b>live demo session</b>: one main agent that spawned two sub-agents. Everything here is interactive.</p>
+    </div>
+
+    <div class="help-section">
+      <h3>1 · Anatomy of a chart</h3>
+      <p class="muted">Each card is one session. The big band plots <b>cumulative input tokens over time</b>; the band below it plots <b>per-turn input</b>. Hover a number to locate it on the chart.</p>
+      <div class="help-anatomy">
+        <div class="help-chart-scroll"><div class="help-chart" id="helpChart"></div></div>
+        <ol class="help-pins-list" id="helpPinsList"></ol>
+      </div>
+    </div>
+
+    <div class="help-section">
+      <h3>2 · The detail view</h3>
+      <p class="muted">Click any card or table row to open the per-turn detail. Rows with tool calls expand; each tool expands again to its args and result. This table is live — try clicking a row:</p>
+      <div class="help-detail" id="helpDetail"></div>
+    </div>
+
+    <div class="help-section">
+      <h3>3 · Toolbar &amp; features</h3>
+      <div class="help-features" id="helpFeatures"></div>
+    </div>
+
+    <div class="help-section">
+      <h3>4 · Colors &amp; marks</h3>
+      <div class="help-colors" id="helpColors"></div>
+    </div>
   </div>
 </div>
 
