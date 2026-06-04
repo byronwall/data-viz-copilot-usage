@@ -76,6 +76,17 @@ function dotFill(c) {
   const cp = c.input > 0 ? c.cached / c.input : 0;
   return cp > 0.7 ? "#58a6ff" : (cp > 0.3 ? "#d29922" : "#f85149");
 }
+// Reasoning EFFORT level pill (not a token count — VS Code folds reasoning tokens into
+// output). Colored low→high so different reasoning levels are visually comparable at a glance.
+const REASONING_COLORS = { minimal: "#6e7681", low: "#3fb950", medium: "#d29922", high: "#ff9a3c", xhigh: "#f85149" };
+function reasoningBadge(r) {
+  if (!r) return `<span class="rsn-none">—</span>`;
+  // mixed levels ("medium·xhigh") render each as its own chip
+  return String(r).split("·").map(part => {
+    const col = REASONING_COLORS[part] || "#a371f7"; // think:* / unknown → purple
+    return `<span class="rsn" style="--rc:${col}">${escapeHtml(part)}</span>`;
+  }).join(" ");
+}
 
 function localMaxT(payload) {
   let mx = 1000;
@@ -288,7 +299,7 @@ function renderDetail(payload) {
 
   let html = `
   <div class="modal-header">
-    <div class="modal-meta">${escapeHtml(payload.sid)} · ws ${escapeHtml(payload.workspace || "")} · ${new Date(payload.last_event_ts || payload.mtime * 1000).toLocaleString()} · model ${escapeHtml(payload.top_model)}</div>
+    <div class="modal-meta">${escapeHtml(payload.sid)} · ws ${escapeHtml(payload.workspace || "")} · ${new Date(payload.last_event_ts || payload.mtime * 1000).toLocaleString()} · model ${escapeHtml(payload.top_model)}${payload.reasoning ? ` · reasoning ${reasoningBadge(payload.reasoning)}` : ""}</div>
     <div class="modal-prompt">${escapeHtml(payload.first_user || "(no user message)")}</div>
     ${linkChip}
     <div class="modal-totals">
@@ -304,7 +315,7 @@ function renderDetail(payload) {
   </div>
   <table class="calls">
     <thead><tr>
-      <th>#</th><th>t</th><th>debugName</th>
+      <th>#</th><th>t</th><th>debugName</th><th>rsn</th>
       <th class="num">input</th><th class="num">cached</th><th>cache%</th>
       <th class="num">out</th><th class="num">AIC</th><th>tool calls</th>
     </tr></thead><tbody>`;
@@ -329,7 +340,7 @@ function renderDetail(payload) {
       } else {
         label = `▸ foreground (panel/editAgent)`;
       }
-      html += `<tr class="kid-section"><td colspan="9">${label}</td></tr>`;
+      html += `<tr class="kid-section"><td colspan="10">${label}</td></tr>`;
     }
     const cp = c.input > 0 ? c.cached / c.input : 0;
     const idx = `${c._grp}-${c.idx}`;
@@ -345,6 +356,7 @@ function renderDetail(payload) {
       <td>${hasTools ? `<span class="caret">▸</span>` : ""}${c.idx + 1}</td>
       <td>${hms(c.t)}</td>
       <td class="${dbgClass}">${escapeHtml(c.dbg)}${c.err ? ` <span style="color:#f85149" title="${escapeHtml(c.err_msg || "request failed")}">✕ error</span>` : ""}</td>
+      <td>${reasoningBadge(c.reasoning)}</td>
       <td class="num">${fmt(c.input)}</td>
       <td class="num cached">${fmt(c.cached)}</td>
       <td>${c.err ? `<span style="color:#f85149">${escapeHtml((c.err_msg || "failed").slice(0, 48))}</span>` : `${bar(c.input, c.cached)} ${Math.round(cp * 100)}%`}</td>
@@ -353,13 +365,15 @@ function renderDetail(payload) {
       <td>${toolSummary}</td>
     </tr>`;
     if (tools.length > 0) {
-      html += `<tr class="tools collapsed"><td colspan="9"><div class="tools-inner">`;
+      html += `<tr class="tools collapsed"><td colspan="10"><div class="tools-inner">`;
       tools.forEach(t => {
         const dur = t.d > 0 ? `<span class="dur">${t.d}ms</span>` : "";
         const summary = summarizeArgs(t.a || "");
         let detail = renderValue(t.a || "");
         if (t.res) detail += `<div class="res"><span class="reslbl">result</span><div class="res-body clamped">${renderValue(t.res)}</div><button class="res-toggle" type="button">show more</button></div>`;
-        html += `<div class="tool"><div class="tool-head"><span class="caret">▸</span><span class="nm">${escapeHtml(t.n)}</span>${dur}<span class="summary">${escapeHtml(summary)}</span></div><div class="tool-detail collapsed">${detail}</div></div>`;
+        const copyText = String(t.a ?? "") + (t.res ? `\n\n--- result ---\n${t.res}` : "");
+        const copyAttr = encodeURIComponent(copyText);
+        html += `<div class="tool"><div class="tool-head"><span class="caret">▸</span><span class="nm">${escapeHtml(t.n)}</span><button class="copy-btn" type="button" data-copy="${copyAttr}" title="Copy full message to clipboard">copy</button>${dur}<span class="summary">${escapeHtml(summary)}</span></div><div class="tool-detail collapsed">${detail}</div></div>`;
       });
       html += `</div></td></tr>`;
     }
@@ -449,6 +463,30 @@ function wireExpand(rightEl) {
       if (!body) return;
       const clamped = body.classList.toggle("clamped");
       btn.textContent = clamped ? "show more" : "show less";
+    });
+  });
+  // copy-to-clipboard: grab the full (unclamped, untruncated) message text.
+  rightEl.querySelectorAll("button.copy-btn").forEach(btn => {
+    btn.addEventListener("click", async e => {
+      e.stopPropagation();
+      const text = decodeURIComponent(btn.dataset.copy || "");
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (_) {
+        // fallback for non-secure contexts where navigator.clipboard is unavailable
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand("copy"); } catch (_) { /* ignore */ }
+        document.body.removeChild(ta);
+      }
+      const orig = btn.textContent;
+      btn.textContent = "copied!";
+      btn.classList.add("copied");
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove("copied"); }, 1200);
     });
   });
 }
@@ -581,7 +619,7 @@ endEl.addEventListener("change", () => { RANGE_PINNED = false; updateRangeInfo()
 // shared link) restores the exact view. Pinned "last N hours" windows persist as
 // hours=N (re-anchored to now on load); explicit windows persist as start/end
 // unix timestamps. Params at their defaults are omitted to keep URLs clean.
-const URL_DEFAULTS = { hours: 24, sort: "total_input", limit: "50", min_tokens: "0" };
+const URL_DEFAULTS = { hours: 24, sort: "total_input", limit: "50", min_tokens: "0", view: "charts" };
 let SUPPRESS_URL = false; // true while restoring state FROM the URL
 
 function syncUrl(push = false) {
@@ -601,6 +639,7 @@ function syncUrl(push = false) {
   if (limit !== URL_DEFAULTS.limit) p.set("limit", limit);
   const minTok = document.getElementById("min_tokens").value;
   if (minTok !== URL_DEFAULTS.min_tokens) p.set("min_tokens", minTok);
+  if (VIEW !== URL_DEFAULTS.view) p.set("view", VIEW);
   if (CAL_SELECTED) p.set("day", CAL_SELECTED);
   if (!calPop.hidden) { p.set("cal", "1"); p.set("cal_year", String(CAL_YEAR)); }
   if (MODAL_SID) p.set("session", MODAL_SID);
@@ -628,6 +667,7 @@ function applyUrlState() {
     document.getElementById("sort").value = p.get("sort") || URL_DEFAULTS.sort;
     document.getElementById("limit").value = p.get("limit") || URL_DEFAULTS.limit;
     document.getElementById("min_tokens").value = p.get("min_tokens") || URL_DEFAULTS.min_tokens;
+    VIEW = p.get("view") === "table" ? "table" : "charts";
     CAL_SELECTED = p.get("day") || null;
     const calYear = Number(p.get("cal_year"));
     if (calYear) CAL_YEAR = calYear;
@@ -823,19 +863,118 @@ async function loadSessions() {
     `· ${data.sessions.length} sessions · ${fmt(tot_req)} reqs · ${fmt(tot_in)} input · ${tot_in ? Math.round(100 * tot_cached / tot_in) : 0}% cached · ${fmtAic(tot_aic)} AIC · shared y-max ${fmt(maxTok)}`;
   document.getElementById("took").textContent = `(${data.took_ms} ms scan)`;
 
+  LAST_SESSIONS = data.sessions;
+  LAST_MAXTOK = maxTok;
+
   if (data.sessions.length === 0) {
     grid.innerHTML = "";
+    document.getElementById("tableWrap").innerHTML = "";
+    grid.hidden = true;
+    document.getElementById("tableWrap").hidden = true;
     empty.hidden = false;
     return;
   }
+  empty.hidden = true;
+  applyView();
+}
 
-  grid.innerHTML = data.sessions.map(s =>
+// ---------- Chart-grid / table views ----------
+// Two renderings of the same session list (the "threads"): the SVG small-multiples
+// grid, and a tabular rollup. Both route a row/card click to the same detail modal.
+let LAST_SESSIONS = [];
+let LAST_MAXTOK = 1000;
+let VIEW = "charts";
+// Column sort for the table view. key=null → keep the server's sort (the controls' sort key).
+let TABLE_SORT = { key: null, dir: -1 };
+
+function renderCards(sessions, maxTok) {
+  const grid = document.getElementById("grid");
+  grid.innerHTML = sessions.map(s =>
     `<div class="card" data-sid="${escapeHtml(s.sid)}">${renderChart(s, { maxTok })}</div>`
   ).join("");
   grid.querySelectorAll(".card").forEach(card => {
     card.addEventListener("click", () => openModal(card.dataset.sid, maxTok));
   });
 }
+
+// One row per thread (session). Each column declares how to read its sort value and
+// how to render its cell, so header-click sorting and rendering stay in lockstep.
+const cachePct = s => (s.total_input ? s.total_cached / s.total_input : 0);
+const TABLE_COLS = [
+  { key: "time", label: "time", num: false, get: s => s.last_event_ts || s.mtime * 1000,
+    render: s => `<span class="t-time">${new Date(s.last_event_ts || s.mtime * 1000).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>` },
+  { key: "model", label: "model", num: false, get: s => s.top_model || "",
+    render: s => `<span class="t-model">${escapeHtml(s.top_model || "?")}</span>` },
+  { key: "reasoning", label: "reasoning", num: false, get: s => s.reasoning || "",
+    render: s => reasoningBadge(s.reasoning) },
+  { key: "thread", label: "thread (first user message)", num: false, get: s => (s.first_user || "").toLowerCase(),
+    render: s => `<span class="t-thread">${escapeHtml(s.first_user || "(no user message)")}</span>` },
+  { key: "n_requests", label: "req", num: true, get: s => s.n_requests || 0,
+    render: s => fmt(s.n_requests) },
+  { key: "total_input", label: "input", num: true, get: s => s.total_input || 0,
+    render: s => fmt(s.total_input) },
+  { key: "total_cached", label: "cached", num: true, get: s => s.total_cached || 0,
+    render: s => `<span class="num cached">${fmt(s.total_cached)}</span>` },
+  { key: "cache_pct", label: "cache%", num: true, get: cachePct,
+    render: s => `<span class="t-cache">${bar(s.total_input, s.total_cached)} ${Math.round(100 * cachePct(s))}%</span>` },
+  { key: "total_output", label: "output", num: true, get: s => s.total_output || 0,
+    render: s => fmt(s.total_output) },
+  { key: "total_aic", label: "AIC", num: true, get: s => s.total_aic || 0,
+    render: s => s.total_aic ? `<span class="aic">${fmtAic(s.total_aic)}</span>` : `<span style="color:#444">—</span>` },
+  { key: "duration", label: "duration", num: true, get: s => s.duration_ms || 0,
+    render: s => hms(s.duration_ms) },
+];
+
+function renderTable(sessions, maxTok) {
+  const wrap = document.getElementById("tableWrap");
+  let rows = sessions.slice();
+  if (TABLE_SORT.key) {
+    const col = TABLE_COLS.find(c => c.key === TABLE_SORT.key);
+    rows.sort((a, b) => {
+      const av = col.get(a), bv = col.get(b);
+      return av < bv ? -TABLE_SORT.dir : av > bv ? TABLE_SORT.dir : 0;
+    });
+  }
+  const thead = TABLE_COLS.map(c => {
+    const arrow = TABLE_SORT.key === c.key ? (TABLE_SORT.dir > 0 ? " ▲" : " ▼") : "";
+    return `<th data-key="${c.key}" class="${c.num ? "num" : ""}">${escapeHtml(c.label)}${arrow}</th>`;
+  }).join("");
+  const body = rows.map(s => {
+    const tds = TABLE_COLS.map(c => `<td class="${c.num ? "num" : ""}">${c.render(s)}</td>`).join("");
+    return `<tr class="trow" data-sid="${escapeHtml(s.sid)}">${tds}</tr>`;
+  }).join("");
+  wrap.innerHTML = `<table class="rollup"><thead><tr>${thead}</tr></thead><tbody>${body}</tbody></table>`;
+  wrap.querySelectorAll("tr.trow").forEach(r => {
+    r.addEventListener("click", () => openModal(r.dataset.sid, maxTok));
+  });
+  wrap.querySelectorAll("th[data-key]").forEach(th => {
+    th.addEventListener("click", () => {
+      const k = th.dataset.key;
+      if (TABLE_SORT.key === k) TABLE_SORT.dir = -TABLE_SORT.dir;
+      else { TABLE_SORT.key = k; TABLE_SORT.dir = -1; }
+      renderTable(LAST_SESSIONS, LAST_MAXTOK);
+    });
+  });
+}
+
+function applyView() {
+  const charts = VIEW !== "table";
+  document.querySelectorAll(".view-btn").forEach(b => b.classList.toggle("active", (b.dataset.view === "table") !== charts));
+  document.getElementById("grid").hidden = !charts;
+  document.getElementById("tableWrap").hidden = charts;
+  if (!LAST_SESSIONS.length) return;
+  if (charts) renderCards(LAST_SESSIONS, LAST_MAXTOK);
+  else renderTable(LAST_SESSIONS, LAST_MAXTOK);
+}
+
+document.querySelectorAll(".view-btn").forEach(b => {
+  b.addEventListener("click", () => {
+    if (VIEW === b.dataset.view) return;
+    VIEW = b.dataset.view;
+    syncUrl();
+    applyView();
+  });
+});
 
 document.getElementById("controls").addEventListener("submit", e => {
   e.preventDefault();

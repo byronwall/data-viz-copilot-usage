@@ -184,6 +184,57 @@ def _aic_for_req(r: dict, models_info: dict) -> float:
     return info.get("mult", 0.0) if info.get("premium") else 0.0
 
 
+def _reasoning_level(a: dict) -> str:
+    """The reasoning/thinking *level* requested for one llm_request.
+
+    VS Code Copilot does NOT log a separate reasoning token COUNT — reasoning is folded
+    into outputTokens. What it does log is the requested effort, in requestOptions:
+      OpenAI responses API: {"reasoning": {"effort": "low|medium|high|xhigh", ...}}
+      Anthropic:            {"thinking": {"type": "enabled", "budget_tokens": 16000}}
+    Returns a short label ("xhigh", "medium", "think:16k", …) or "" when none was set.
+    """
+    ro = a.get("requestOptions")
+    if isinstance(ro, str):
+        try:
+            ro = json.loads(ro)
+        except Exception:
+            ro = {}
+    if not isinstance(ro, dict):
+        return ""
+    r = ro.get("reasoning")
+    if isinstance(r, dict) and r.get("effort"):
+        return str(r["effort"])
+    th = ro.get("thinking")
+    if isinstance(th, dict) and th.get("type") == "enabled":
+        b = th.get("budget_tokens")
+        try:
+            return f"think:{int(b) // 1000}k" if b else "think"
+        except (TypeError, ValueError):
+            return "think"
+    return ""
+
+
+# Display order for reasoning levels (low → highest); anything unknown sorts last-but-known.
+_REASONING_RANK = {"minimal": 0, "low": 1, "medium": 2, "high": 3, "xhigh": 4}
+
+
+def _reasoning_summary(calls: list) -> str:
+    """Collapse a session's per-call reasoning levels into one label for the rollup.
+
+    Most sessions use a single level → just that label. Mixed sessions show the distinct
+    levels low→high joined with '·' so the table reveals when a thread spanned levels.
+    """
+    seen = []
+    for c in calls:
+        r = c.get("reasoning")
+        if r and r not in seen:
+            seen.append(r)
+    if not seen:
+        return ""
+    seen.sort(key=lambda r: (_REASONING_RANK.get(r, 99), r))
+    return "·".join(seen)
+
+
 def _short(s, n=200):
     if not isinstance(s, str):
         s = str(s)
@@ -278,6 +329,9 @@ def _load_jsonl(path: str) -> dict:
                         "debugName": a.get("debugName", "?"),
                         "ttft": a.get("ttft", 0) or 0,
                         "model": a.get("model", "?"),
+                        # requested reasoning/thinking effort level (not a token count — VS Code
+                        # doesn't log reasoning tokens separately; they're inside outputTokens)
+                        "reasoning": _reasoning_level(a),
                         # billed credits ×1e9, reported by the Copilot API per request;
                         # None on older logs / failed requests
                         "nano_aiu": a.get("copilotUsageNanoAiu"),
@@ -667,7 +721,7 @@ def build_series(sess: Session) -> tuple[list, list]:
                 "ts": e["ts"], "t_rel": e["ts"] - t0,
                 "input": e["input"], "cached": e["cached"], "output": e["output"],
                 "debugName": e["debugName"], "model": e["model"], "ttft": e["ttft"],
-                "nano_aiu": e.get("nano_aiu"),
+                "nano_aiu": e.get("nano_aiu"), "reasoning": e.get("reasoning", ""),
                 "is_compact": e["debugName"] in COMPACT_NAMES,
                 "is_error": e.get("is_error", False), "error": e.get("error", ""),
                 "tools_before": pending[:],
@@ -702,7 +756,7 @@ def build_series(sess: Session) -> tuple[list, list]:
                 ccalls.append({"idx": len(ccalls), "ts": e["ts"], "t_rel": e["ts"] - t0,
                                "input": e["input"], "cached": e["cached"], "output": e["output"],
                                "debugName": e["debugName"], "model": e["model"], "ttft": e["ttft"],
-                               "nano_aiu": e.get("nano_aiu"),
+                               "nano_aiu": e.get("nano_aiu"), "reasoning": e.get("reasoning", ""),
                                "is_compact": e["debugName"] in COMPACT_NAMES,
                                "is_error": e.get("is_error", False), "error": e.get("error", ""),
                                "tools_before": pending[:]})
@@ -846,6 +900,8 @@ def session_summary(s: Session) -> dict:
         "duration_ms": s.duration_ms,
         "top_model": s.top_model,
         "total_aic": s.total_aic,
+        # dominant reasoning/thinking level(s) across foreground requests (effort, not a token count)
+        "reasoning": _reasoning_summary(main_calls),
         "parent_sid": s.parent_sid,
         "parent_first_user": s.parent_first_user,
         "search_children": s.search_children,
@@ -854,7 +910,7 @@ def session_summary(s: Session) -> dict:
                   "cached": c["cached"], "output": c["output"],
                   "dbg": c["debugName"], "compact": c["is_compact"],
                   "err": c.get("is_error", False),
-                  "aic": with_aic(c),
+                  "aic": with_aic(c), "reasoning": c.get("reasoning", ""),
                   "cum": c["cum"]} for c in main_calls],
         "kids": [{"label": k["label"], "start_t": k["start_t"], "start_tok": k["start_tok"],
                   "is_search_child": k.get("is_search_child", False),
@@ -863,7 +919,7 @@ def session_summary(s: Session) -> dict:
                              "cached": c["cached"], "output": c["output"],
                              "dbg": c["debugName"], "compact": c["is_compact"],
                              "err": c.get("is_error", False),
-                             "aic": with_aic(c),
+                             "aic": with_aic(c), "reasoning": c.get("reasoning", ""),
                              "cum_offset": c["cum_offset"]} for c in k["calls"]]}
                  for k in kids],
     }
@@ -879,7 +935,7 @@ def session_detail(s: Session) -> dict:
             "output": c["output"], "dbg": c["debugName"], "model": c["model"],
             "ttft": c["ttft"], "compact": c["is_compact"],
             "err": c.get("is_error", False), "err_msg": c.get("error", ""),
-            "aic": _aic_for_req(c, s.models_info),
+            "aic": _aic_for_req(c, s.models_info), "reasoning": c.get("reasoning", ""),
             "cum": c.get("cum"), "cum_offset": c.get("cum_offset"),
             "tools": [{"n": t["name"], "a": t["args"], "res": t.get("result", ""),
                        "d": t["dur"], "s": t["status"], "t": t["t_rel"]}
@@ -900,6 +956,7 @@ def session_detail(s: Session) -> dict:
         "duration_ms": s.duration_ms,
         "top_model": s.top_model,
         "total_aic": s.total_aic,
+        "reasoning": _reasoning_summary(main_calls),
         "parent_sid": s.parent_sid,
         "parent_first_user": s.parent_first_user,
         "search_children": s.search_children,

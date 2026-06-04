@@ -40,6 +40,10 @@
     <button type="submit" class="primary">Refresh</button>
     <span id="took" class="muted small"></span>
   </form>
+  <div class="view-toggle" id="viewToggle">
+    <button type="button" class="view-btn active" data-view="charts">charts</button>
+    <button type="button" class="view-btn" data-view="table">table</button>
+  </div>
   <div class="legend">
     <span><span class="dot" style="background:#58a6ff"></span>foreground (panel/editAgent)</span>
     <span><span class="dot" style="background:#a371f7"></span>sub-agent</span>
@@ -63,6 +67,7 @@
 
 <main>
   <div id="grid" class="grid"></div>
+  <div id="tableWrap" hidden></div>
   <div id="empty" class="empty" hidden>No sessions in this window.</div>
 </main>
 

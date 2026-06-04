@@ -38,6 +38,14 @@ h1 { font-weight: 600; margin: 0 0 8px; font-size: 18px; }
 #controls .vsep { width: 1px; height: 18px; background: var(--border); margin: 0 4px; }
 #rangeInfo { margin: 0 4px; }
 
+/* charts / table view toggle */
+.view-toggle { display: inline-flex; margin-bottom: 8px; }
+.view-toggle .view-btn { background: var(--row); color: var(--mute); border: 1px solid var(--border); padding: 0 14px; height: 26px; cursor: pointer; font-size: 12px; line-height: 24px; }
+.view-toggle .view-btn:first-child { border-radius: 4px 0 0 4px; border-right-width: 0; }
+.view-toggle .view-btn:last-child { border-radius: 0 4px 4px 0; }
+.view-toggle .view-btn:hover { background: #21262d; color: var(--fg); }
+.view-toggle .view-btn.active { background: var(--blue); color: #fff; border-color: var(--blue); font-weight: 600; }
+
 .legend { display: flex; gap: 16px; font-size: 11px; color: #8b949e; flex-wrap: wrap; align-items: center; }
 .legend span { display: inline-flex; align-items: center; gap: 4px; }
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
@@ -71,9 +79,36 @@ header { position: relative; }
 .cal-week-grid .cal-cell { min-height: 24px; }
 
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 8px; }
+/* [hidden] alone loses to .grid's display:grid — make hiding explicit so charts/table are exclusive */
+.grid[hidden], #tableWrap[hidden] { display: none; }
 .card { cursor: zoom-in; transition: outline 0.1s; }
 .card:hover svg { outline: 1px solid #2a4a6b; }
 .empty { color: var(--mute); padding: 40px; text-align: center; }
+
+/* Reasoning effort pill (used in the rollup table, detail table, and modal header).
+   Color ramps low→high; --rc set inline per level. NOT a token count — VS Code folds
+   reasoning tokens into output, so this is the requested effort level. */
+.rsn { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 10.5px; font-weight: 600;
+  font-family: ui-monospace, monospace; color: var(--rc, #a371f7); border: 1px solid var(--rc, #a371f7);
+  background: color-mix(in srgb, var(--rc, #a371f7) 14%, transparent); white-space: nowrap; line-height: 1.4; }
+.rsn-none { color: #444; }
+
+/* Table rollup — one row per thread (session) */
+#tableWrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
+table.rollup { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.rollup th { position: sticky; top: 0; background: #21262d; color: #8b949e; text-align: left;
+  padding: 7px 10px; font-weight: 600; border-bottom: 1px solid var(--border); cursor: pointer; white-space: nowrap; user-select: none; z-index: 2; }
+table.rollup th:hover { color: var(--fg); }
+table.rollup th.num { text-align: right; }
+table.rollup td { padding: 6px 10px; border-bottom: 1px solid #21262d; vertical-align: middle; white-space: nowrap; }
+table.rollup tr.trow { cursor: zoom-in; }
+table.rollup tr.trow:hover { background: #1a212a; }
+table.rollup tr.trow:hover .t-thread { color: var(--blue); }
+.t-time { color: var(--mute); font-family: ui-monospace, monospace; font-size: 11px; }
+.t-model { color: var(--purple); font-family: ui-monospace, monospace; }
+.t-thread { display: inline-block; max-width: 46vw; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.t-cache { white-space: nowrap; color: var(--mute); }
+table.rollup td.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 /* Modal */
 .modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.88); display: none; z-index: 50; }
@@ -137,6 +172,9 @@ tr.tools td { padding: 0; background: #0d1117; }
 .tools-inner .res-body.clamped::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 22px; background: linear-gradient(transparent, #0d1117); pointer-events: none; }
 .tools-inner .res-toggle { margin-top: 3px; padding: 0; border: 0; background: none; color: #58a6ff; font: inherit; font-size: 9.5px; cursor: pointer; }
 .tools-inner .res-toggle:hover { text-decoration: underline; }
+.tools-inner .tool .copy-btn { flex: none; padding: 1px 6px; border: 1px solid #30363d; border-radius: 4px; background: #161b22; color: #8b949e; font: inherit; font-size: 9px; cursor: pointer; }
+.tools-inner .tool .copy-btn:hover { border-color: #58a6ff; color: #58a6ff; }
+.tools-inner .tool .copy-btn.copied { border-color: #3fb950; color: #3fb950; }
 .bar { display: inline-block; height: 8px; background: #30363d; border-radius: 2px; vertical-align: middle; position: relative; width: 80px; overflow: hidden; }
 .bar > i { display: block; height: 100%; background: var(--blue); float: left; }
 .bar > i.uncached { background: var(--red); }
