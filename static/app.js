@@ -366,6 +366,18 @@ function renderChart(payload, opts) {
   return svg;
 }
 
+// One tool call's collapsible block: a one-line head (name + arg gist + duration +
+// copy) that expands to the full args (and result, if any). Shared by the per-turn
+// table and the by-tool aggregate view so both render tool params identically.
+function toolBlockHtml(t) {
+  const dur = t.d > 0 ? `<span class="dur">${t.d}ms</span>` : "";
+  const summary = summarizeArgs(t.a || "");
+  let detail = renderValue(t.a || "");
+  if (t.res) detail += `<div class="res"><span class="reslbl">result</span><div class="res-body clamped">${renderValue(t.res)}</div><button class="res-toggle" type="button">show more</button></div>`;
+  const copyAttr = encodeURIComponent(String(t.a ?? "") + (t.res ? `\n\n--- result ---\n${t.res}` : ""));
+  return `<div class="tool"><div class="tool-head"><span class="caret">▸</span><span class="nm">${escapeHtml(t.n)}</span><button class="copy-btn" type="button" data-copy="${copyAttr}" title="Copy full message to clipboard">copy</button>${dur}<span class="summary">${escapeHtml(summary)}</span></div><div class="tool-detail collapsed">${detail}</div></div>`;
+}
+
 function renderDetail(payload) {
   const all = [];
   (payload.main || []).forEach(c => all.push({ ...c, _grp: "P" }));
@@ -399,7 +411,13 @@ function renderDetail(payload) {
       <span>compactions <b style="color:#ff9a3c">${compactCalls.length}</b> (${fmt(compact_total)} tok)</span>
       <span>duration <b>${hms(payload.duration_ms)}</b></span>
     </div>
+    <div class="view-toggle dview-toggle">
+      <button type="button" class="dview-btn active" data-dview="turns">turns</button>
+      <button type="button" class="dview-btn" data-dview="tools">by tool</button>
+      <button type="button" class="dview-btn" data-dview="files">by file</button>
+    </div>
   </div>
+  <div class="dview" data-dview="turns">
   <table class="calls">
     <thead><tr>
       <th>#</th><th>t</th><th>debugName</th><th>rsn</th>
@@ -454,20 +472,650 @@ function renderDetail(payload) {
     </tr>`;
     if (tools.length > 0) {
       html += `<tr class="tools collapsed"><td colspan="10"><div class="tools-inner">`;
-      tools.forEach(t => {
-        const dur = t.d > 0 ? `<span class="dur">${t.d}ms</span>` : "";
-        const summary = summarizeArgs(t.a || "");
-        let detail = renderValue(t.a || "");
-        if (t.res) detail += `<div class="res"><span class="reslbl">result</span><div class="res-body clamped">${renderValue(t.res)}</div><button class="res-toggle" type="button">show more</button></div>`;
-        const copyText = String(t.a ?? "") + (t.res ? `\n\n--- result ---\n${t.res}` : "");
-        const copyAttr = encodeURIComponent(copyText);
-        html += `<div class="tool"><div class="tool-head"><span class="caret">▸</span><span class="nm">${escapeHtml(t.n)}</span><button class="copy-btn" type="button" data-copy="${copyAttr}" title="Copy full message to clipboard">copy</button>${dur}<span class="summary">${escapeHtml(summary)}</span></div><div class="tool-detail collapsed">${detail}</div></div>`;
-      });
+      tools.forEach(t => { html += toolBlockHtml(t); });
       html += `</div></td></tr>`;
     }
   });
-  html += "</tbody></table>";
+  html += "</tbody></table></div>";
+  html += `<div class="dview" data-dview="tools" hidden>${renderToolAgg(payload)}</div>`;
+  html += `<div class="dview" data-dview="files" hidden>${renderFileAgg(payload)}</div>`;
   return html;
+}
+
+// ---------- "By tool" aggregate view ----------
+// Rolls token usage up by the tool a request invoked. "new input" is each request's
+// input delta vs. the previous request in the SAME agent (foreground or a given
+// sub-agent), since each agent grows its own context. A request's metrics are
+// attributed to every distinct tool it called, so a request that invokes several
+// tools is counted under each — column totals can therefore exceed the (honest)
+// session totals shown above the table. Requests with no tools fall into a
+// "(no tool call)" bucket so compactions and the like are still accounted for.
+const NO_TOOL = "(no tool call)";
+
+function computeToolAgg(payload) {
+  const groups = [{ label: "foreground", calls: payload.main || [] }];
+  (payload.kids || []).forEach((k, ki) => {
+    const label = k.is_search_child
+      ? `🔍 search-subagent ${k.child_sid ? k.child_sid.slice(0, 8) : ""}`
+      : `sub-agent: ${k.label || ("K" + ki)}`;
+    groups.push({ label, calls: k.calls || [] });
+  });
+
+  const buckets = new Map(); // tool name -> bucket
+  function bucketFor(name) {
+    let b = buckets.get(name);
+    if (!b) { b = { name, callers: new Map(), sumNew: 0, sumUncached: 0, sumOut: 0, sumAic: 0, uses: 0 }; buckets.set(name, b); }
+    return b;
+  }
+
+  let totalNew = 0, totalUncached = 0;
+  groups.forEach(g => {
+    let prevInput = null;
+    g.calls.forEach(c => {
+      const input = c.input || 0;
+      // Delta vs. the previous request in this agent. Clamp at 0: a request that
+      // shrank the context (e.g. right after a compaction) added no new input — the
+      // compaction's own big input lands in the (no tool call) bucket instead.
+      const newInput = prevInput == null ? input : Math.max(0, input - prevInput);
+      prevInput = input;
+      totalNew += newInput;
+      const uncached = Math.max(0, input - (c.cached || 0));
+      totalUncached += uncached;
+
+      const tools = c.tools || [];
+      const callKey = `${g.label}#${c.idx}`;
+      const meta = {
+        key: callKey, t: c.t, dbg: c.dbg, grp: g.label,
+        compact: !!c.compact, err: !!c.err, errMsg: c.err_msg || "",
+        newInput, uncached, out: c.output || 0, aic: c.aic || 0,
+      };
+      const names = tools.length ? [...new Set(tools.map(t => t.n || "?"))] : [NO_TOOL];
+      names.forEach(nm => {
+        const b = bucketFor(nm);
+        let caller = b.callers.get(callKey);
+        if (!caller) {
+          caller = { ...meta, instances: [] };
+          b.callers.set(callKey, caller);
+          b.sumNew += meta.newInput; b.sumUncached += meta.uncached; b.sumOut += meta.out; b.sumAic += meta.aic;
+        }
+        if (nm === NO_TOOL) { b.uses += 1; return; }
+        const insts = tools.filter(t => (t.n || "?") === nm);
+        insts.forEach(t => { caller.instances.push(t); b.uses += 1; });
+      });
+    });
+  });
+
+  const list = [...buckets.values()].map(b => ({
+    name: b.name,
+    nCallers: b.callers.size,
+    uses: b.uses,
+    sumNew: b.sumNew, sumUncached: b.sumUncached, sumOut: b.sumOut, sumAic: b.sumAic,
+    callers: [...b.callers.values()].sort((a, z) => z.aic - a.aic),
+  })).sort((a, z) => z.sumAic - a.sumAic);
+
+  const totalAic = payload.total_aic != null ? payload.total_aic : list.reduce((s, b) => s + b.sumAic, 0);
+  return { list, totalNew, totalUncached, totalOut: payload.total_output || 0, totalAic };
+}
+
+// Pull a file path out of a tool's args JSON, trying the keys various tools use.
+function toolFilePath(argStr) {
+  const s = String(argStr ?? "").trim();
+  if (s[0] === "{") {
+    try {
+      const o = JSON.parse(s);
+      return o.filePath || o.path || o.file || o.target_file || o.absolute_path || o.relativePath || "";
+    } catch (_) { /* not json */ }
+  }
+  return "";
+}
+
+// A short "what part of the file" hint from read args (line range / offset+limit).
+function fileRange(argStr) {
+  const s = String(argStr ?? "").trim();
+  if (s[0] === "{") {
+    try {
+      const o = JSON.parse(s);
+      if (o.startLine != null || o.endLine != null) return `L${o.startLine ?? ""}–${o.endLine ?? ""}`;
+      if (o.offset != null || o.limit != null) return `@${o.offset ?? 0}${o.limit != null ? ` +${o.limit}` : ""}`;
+    } catch (_) { /* ignore */ }
+  }
+  return "";
+}
+// Numeric [start,end] line span from read args (for the line heatmap), or null.
+function parseRange(argStr) {
+  const s = String(argStr ?? "").trim();
+  if (s[0] === "{") {
+    try {
+      const o = JSON.parse(s);
+      let a, b;
+      if (o.startLine != null || o.endLine != null) { a = +o.startLine || 1; b = +o.endLine || a; }
+      else if (o.offset != null || o.limit != null) { a = (+o.offset || 0) + 1; b = a + (+o.limit || 0); }
+      else return null;
+      a = Math.max(1, a); b = Math.max(a, b);
+      return { start: a, end: b };
+    } catch (_) { /* ignore */ }
+  }
+  return null;
+}
+// Heat color by read count: first read cool (blue), heating through green/yellow/orange
+// to red as the same lines get re-read. 0 = unread (faint track).
+const HEAT_SCALE = ["#1f6feb", "#2f9e44", "#e3b341", "#f0883e", "#f85149"];
+function heatColor(n) {
+  if (n <= 0) return "#161b22";
+  return HEAT_SCALE[Math.min(n, HEAT_SCALE.length) - 1];
+}
+// Build a stretched SVG strip across a file's line range; each segment colored by how
+// many of the reads covered it. Returns the svg plus the file's max line and peak overlap.
+function lineHeatStrip(spans, fixedMax) {
+  const maxLine = Math.max(1, fixedMax || Math.max(1, ...spans.map(s => s.end)));
+  const N = Math.min(240, Math.max(1, maxLine));
+  const lpb = maxLine / N;
+  const counts = new Array(N).fill(0);
+  spans.forEach(s => {
+    const a = Math.max(0, Math.floor((s.start - 1) / lpb));
+    const b = Math.min(N - 1, Math.floor((s.end - 1) / lpb));
+    for (let i = a; i <= b; i++) counts[i]++;
+  });
+  const maxC = Math.max(1, ...counts);
+  let rects = "";
+  for (let i = 0; i < N; i++) {
+    const c = counts[i];
+    const lo = Math.floor(i * lpb) + 1, hi = Math.min(maxLine, Math.floor((i + 1) * lpb));
+    const title = c > 0 ? `<title>L${lo}–${hi}: ${c}×</title>` : "";
+    rects += `<rect x="${i}" y="0" width="1.02" height="12" fill="${heatColor(c)}">${title}</rect>`;
+  }
+  return { svg: `<svg class="heat-svg" viewBox="0 0 ${N} 12" preserveAspectRatio="none" shape-rendering="crispEdges">${rects}</svg>`, maxLine, maxC };
+}
+
+// Guess the working root (e.g. the worktree). Rather than the longest common prefix —
+// which a handful of out-of-tree reads (system files, the VS Code cache) drag up to
+// something useless like /Users/name — we score every candidate ancestor directory by
+// coverage × depth and take the best. That favors the deepest directory that still holds
+// most files: the worktree wins, while the stray system reads stay outside it.
+function guessRoot(paths) {
+  const norm = paths.filter(Boolean).map(p => p.replace(/\\/g, "/"));
+  if (!norm.length) return "";
+  const total = norm.length;
+  const count = new Map(); // ancestor dir -> # files under it
+  for (const p of norm) {
+    const segs = p.split("/");
+    let acc = "";
+    for (let i = 0; i < segs.length - 1; i++) { // ancestors only, exclude the filename
+      acc = i === 0 ? segs[0] : acc + "/" + segs[i];
+      count.set(acc, (count.get(acc) || 0) + 1);
+    }
+  }
+  let best = "", bestScore = 0, bestDepth = 0;
+  for (const [prefix, n] of count) {
+    const depth = prefix.split("/").filter(Boolean).length;
+    if (!depth) continue; // ignore filesystem root "/"
+    const score = (n / total) * depth;
+    if (score > bestScore || (score === bestScore && depth > bestDepth)) {
+      best = prefix; bestScore = score; bestDepth = depth;
+    }
+  }
+  return best;
+}
+function underRoot(root, p) {
+  p = String(p ?? "").replace(/\\/g, "/");
+  return !!root && (p === root || p.startsWith(root + "/"));
+}
+function relTo(root, p) {
+  p = String(p ?? "").replace(/\\/g, "/");
+  return underRoot(root, p) ? p.slice(root.length).replace(/^\//, "") : p;
+}
+
+// Flatten a bucket's callers into one event per tool invocation (inst), carrying the
+// owning request's metadata. Callers with no instances (e.g. compactions) yield one
+// inst-less event so they still appear.
+function bucketEvents(bucket) {
+  const events = [];
+  bucket.callers.forEach(c => {
+    const base = { aic: c.aic, grp: c.grp, dbg: c.dbg, newInput: c.newInput, uncached: c.uncached, callT: c.t };
+    if (c.instances.length) c.instances.forEach(inst => events.push({ ...base, t: inst.t != null ? inst.t : c.t, inst }));
+    else events.push({ ...base, t: c.t, inst: null });
+  });
+  return events;
+}
+
+// Hover disclosure for the "×N" reads badge: a list of every read of that file with a
+// timestamp, line range and result size, so a high count can be inspected call-by-call.
+function readsPopover(rel, calls) {
+  const rows = calls.map((c, i) =>
+    `<tr><td class="num">${i + 1}</td><td>${hms(c.t)}</td><td class="rng">${escapeHtml(c.range || "full")}</td><td class="num">${c.resLen ? qtyText(c.resLen) + "c" : "—"}</td><td class="num">${c.dur ? c.dur + "ms" : ""}</td></tr>`
+  ).join("");
+  return `<span class="rcount-pop"><span class="rcp-head">${calls.length} reads of <b>${escapeHtml(rel)}</b></span>`
+    + `<table class="rcp-tbl"><thead><tr><th class="num">#</th><th>time</th><th>range</th><th class="num">result</th><th class="num">dur</th></tr></thead><tbody>${rows}</tbody></table></span>`;
+}
+
+// Stable short agent identifier from a list of events, ordered by first-seen.
+// Foreground gets "main"; 🔍 search sub-agents get "search N"; others get "sub N".
+function stableAgentIdent(events) {
+  const firstT = new Map();
+  events.forEach(e => { if (!firstT.has(e.grp)) firstT.set(e.grp, e.t || 0); });
+  const grps = [...firstT.keys()].sort((a, z) =>
+    a === "foreground" ? -1 : z === "foreground" ? 1 : firstT.get(a) - firstT.get(z));
+  const map = new Map();
+  let subIdx = 0, searchIdx = 0;
+  grps.forEach(grp => {
+    if (grp === "foreground") map.set(grp, { color: "#58a6ff", icon: "■", short: "main" });
+    else if (grp.startsWith("🔍")) map.set(grp, { color: "#79c0ff", icon: "🔍", short: `search ${++searchIdx}` });
+    else map.set(grp, { color: PALETTE[subIdx % PALETTE.length], icon: "◆", short: `sub ${++subIdx}` });
+  });
+  return map;
+}
+
+// Render a compact agent badge: colored swatch + short id, full grp on hover.
+function agentBadgeHtml(id, grp) {
+  if (!id) return `<span class="grp" title="${escapeHtml(grp || "")}">${escapeHtml(grp || "")}</span>`;
+  return `<span class="agent-badge" title="${escapeHtml(grp || "")}"><i class="agent-swatch" style="background:${id.color}">${id.icon}</i><span class="agent-short">${escapeHtml(id.short)}</span></span>`;
+}
+
+// Dedicated read_file view: every read as a row, paths shown relative to a guessed
+// root, sortable by name or time, each row expanding to full args + result.
+function buildFilePanel(bucket, ul) {
+  const events = bucketEvents(bucket);
+  const paths = events.map(e => toolFilePath(e.inst && e.inst.a));
+  const root = guessRoot(paths.filter(Boolean));
+  const rels = paths.map(p => p ? relTo(root, p) : "");
+  const counts = {};
+  const fileCalls = {}; // rel -> [{t, range, resLen, dur}] across all its reads, time-ordered
+  events.forEach((e, i) => {
+    const r = rels[i];
+    if (!r) return;
+    counts[r] = (counts[r] || 0) + 1;
+    const inst = e.inst;
+    (fileCalls[r] = fileCalls[r] || []).push({
+      t: e.t || 0, range: inst ? fileRange(inst.a) : "",
+      resLen: inst && inst.res ? inst.res.length : 0, dur: inst ? (inst.d || 0) : 0,
+    });
+  });
+  Object.values(fileCalls).forEach(a => a.sort((x, y) => x.t - y.t));
+  const outside = paths.filter(p => p && !underRoot(root, p)).length;
+  const order = events.map((_, i) => i).sort((a, z) => (events[a].t || 0) - (events[z].t || 0));
+  // per-read records (carry the agent) for the line heatmap, grouped by agent there.
+  const reads = events.map((e, i) => ({ rel: rels[i], grp: e.grp, t: e.t || 0, span: e.inst ? parseRange(e.inst.a) : null })).filter(r => r.rel);
+  const ident = stableAgentIdent(events);
+
+  let h = `<div class="tagg-file-head"><span>root <code>${root ? escapeHtml(root) : "—"}</code></span><span><b>${Object.keys(counts).length}</b> files · <b>${events.length}</b> reads${outside ? ` · <b>${outside}</b> outside root <span class="muted">(full path)</span>` : ""}</span></div>`;
+  h += `<div class="view-toggle rf-toggle">
+    <button type="button" class="rf-btn active" data-rfview="table">table</button>
+    <button type="button" class="rf-btn" data-rfview="heatmap">line heatmap</button>
+  </div>`;
+  h += `<div class="rf-view" data-rfview="table"><div class="tagg-file-sub muted">click a row for full args &amp; result · click a ↕ header to sort</div>`;
+  h += `<table class="tagg-files"><colgroup><col class="c-num"><col class="c-time"><col class="c-file"><col class="c-reads"><col class="c-range"><col class="c-res"><col class="c-dur"><col class="c-src"><col class="c-aic"></colgroup><thead><tr>
+    <th class="num" data-sort="ord" data-sort-type="num">#</th>
+    <th data-sort="t" data-sort-type="num">time</th>
+    <th data-sort="file" data-sort-type="str">file</th>
+    <th class="num" data-sort="reads" data-sort-type="num">reads</th>
+    <th data-sort="range" data-sort-type="str">range</th>
+    <th class="num" data-sort="res" data-sort-type="num">result</th>
+    <th class="num" data-sort="dur" data-sort-type="num">dur</th>
+    <th data-sort="src" data-sort-type="str">source</th>
+    <th class="num" data-sort="aic" data-sort-type="num">${ul}</th>
+  </tr></thead><tbody>`;
+  order.forEach((ei, ord) => {
+    const e = events[ei], inst = e.inst;
+    const rel = rels[ei] || "(no path)";
+    const ext = paths[ei] && !underRoot(root, paths[ei]);
+    const cnt = rels[ei] ? counts[rels[ei]] : 0;
+    const range = inst ? fileRange(inst.a) : "";
+    const resLen = inst && inst.res ? inst.res.length : 0;
+    const dur = inst ? (inst.d || 0) : 0;
+    const exp = inst ? " expandable" : "";
+    const id = ident.get(e.grp);
+    const srcKey = (id ? id.short : e.grp || "") + " " + (e.dbg || "");
+    h += `<tr class="srow${exp}" data-ord="${ord}" data-t="${e.t || 0}" data-file="${escapeHtml(rel.toLowerCase())}" data-reads="${cnt || 0}" data-range="${escapeHtml(range.toLowerCase())}" data-res="${resLen}" data-dur="${dur}" data-src="${escapeHtml(srcKey.toLowerCase())}" data-aic="${e.aic || 0}">
+      <td class="num">${ord + 1}</td>
+      <td>${hms(e.t || 0)}</td>
+      <td>${inst ? `<span class="caret">▸</span>` : ""}<span class="fpath${ext ? " ext" : ""}" title="${escapeHtml(paths[ei] || "")}">${ext ? "↗ " : ""}${escapeHtml(rel)}</span></td>
+      <td class="num">${cnt > 1 ? `<span class="rcount">×${cnt}${readsPopover(rels[ei], fileCalls[rels[ei]])}</span>` : (cnt || "")}</td>
+      <td class="frange">${escapeHtml(range)}</td>
+      <td class="num">${resLen ? qtyText(resLen) + "c" : "<span style='color:#444'>—</span>"}</td>
+      <td class="num">${dur ? dur + "ms" : ""}</td>
+      <td class="dbg">${agentBadgeHtml(id, e.grp)}${e.dbg ? ` <span class="dbgn">${escapeHtml(e.dbg)}</span>` : ""}</td>
+      <td class="num aic">${e.aic ? fmtAic(e.aic) : "<span style='color:#444'>—</span>"}</td>
+    </tr>`;
+    if (inst) h += `<tr class="srow-detail collapsed"><td colspan="9"><div class="tools-inner">${toolBlockHtml(inst)}</div></td></tr>`;
+  });
+  h += `</tbody></table></div>`;
+  h += `<div class="rf-view" data-rfview="heatmap" hidden>${buildLineHeatmap(reads)}</div>`;
+  return h;
+}
+
+// Stable per-agent identity (color + icon) for the heatmap. Foreground and 🔍 search
+// sub-agents get fixed marks; other sub-agents cycle the palette in first-seen order so
+// the same agent keeps the same color/icon throughout the view.
+function agentIdentity(grps) {
+  const map = new Map();
+  let subIdx = 0;
+  grps.forEach(grp => {
+    if (map.has(grp)) return;
+    if (grp === "foreground") map.set(grp, { color: "#58a6ff", icon: "■", short: "main" });
+    else if (grp.startsWith("🔍")) map.set(grp, { color: "#79c0ff", icon: "🔍", short: "search" });
+    else map.set(grp, { color: PALETTE[subIdx % PALETTE.length], icon: "◆", short: `sub ${++subIdx}` });
+  });
+  return map;
+}
+
+function heatStripHtml(svg, maxLine) {
+  return `<div class="heat-strip"><span class="heat-ax">1</span>${svg}<span class="heat-ax">${fmt(maxLine)}</span></div>`;
+}
+
+// Per-file line-coverage heatmap. Condensed by default: one combined strip per file
+// (all agents merged). Files read by more than one agent are expandable — click to
+// reveal a per-agent split (aligned to the same line scale), click again to collapse.
+// A stable colored icon IDs each agent (swatches on the condensed row, full label in
+// the split). Files are ordered by total read count (hottest first).
+function buildLineHeatmap(reads) {
+  const legend = HEAT_SCALE.map((c, i) => `<span class="heat-key"><i style="background:${c}"></i>${i + 1 === HEAT_SCALE.length ? `${i + 1}+` : i + 1}×</span>`).join("");
+  let h = `<div class="heat-legend"><span class="muted">reads per line — cool→hot as the same lines are re-read · hover a band for its range · click a multi-agent file to split by agent</span><span class="heat-keys"><i style="background:${heatColor(0)};outline:1px solid #30363d"></i>unread ${legend}</span></div>`;
+  if (!reads.length) { h += `<div class="tagg-file-sub muted" style="padding:16px 12px">No reads to chart.</div>`; return h; }
+
+  // stable agent identity/order across the whole panel
+  const byGrpAll = new Map();
+  reads.forEach(r => { if (!byGrpAll.has(r.grp)) byGrpAll.set(r.grp, []); byGrpAll.get(r.grp).push(r); });
+  const firstT = grp => Math.min(...byGrpAll.get(grp).map(r => r.t));
+  const grpsOrdered = [...byGrpAll.keys()].sort((a, z) =>
+    a === "foreground" ? -1 : z === "foreground" ? 1 : firstT(a) - firstT(z));
+  const ident = agentIdentity(grpsOrdered);
+
+  // per-file aggregation (combined + per-agent)
+  const fileMap = new Map();
+  reads.forEach(r => {
+    let f = fileMap.get(r.rel);
+    if (!f) { f = { rel: r.rel, reads: 0, spans: [], byAgent: new Map() }; fileMap.set(r.rel, f); }
+    f.reads++; if (r.span) f.spans.push(r.span);
+    let a = f.byAgent.get(r.grp);
+    if (!a) { a = { reads: 0, spans: [] }; f.byAgent.set(r.grp, a); }
+    a.reads++; if (r.span) a.spans.push(r.span);
+  });
+  const files = [...fileMap.values()].sort((a, z) => z.reads - a.reads || z.byAgent.size - a.byAgent.size);
+  const withSpans = files.filter(f => f.spans.length);
+  const noSpans = files.filter(f => !f.spans.length);
+  if (!withSpans.length) h += `<div class="tagg-file-sub muted" style="padding:16px 12px">No line-range info recorded for these reads.</div>`;
+
+  withSpans.forEach((f, fi) => {
+    const agents = grpsOrdered.filter(g => f.byAgent.has(g));
+    const expandable = agents.length > 1;
+    const { svg, maxLine, maxC } = lineHeatStrip(f.spans);
+    const swatches = agents.slice(0, 6).map(g => {
+      const id = ident.get(g);
+      return `<i class="heat-swatch" style="background:${id.color}" title="${escapeHtml(g)}">${id.icon}</i>`;
+    }).join("") + (agents.length > 6 ? `<span class="muted heat-more">+${agents.length - 6}</span>` : "");
+
+    h += `<div class="heat-file${expandable ? " expandable" : ""}" data-hf="${fi}">
+      <div class="heat-meta">
+        <span class="heat-left">${expandable ? `<span class="caret">▸</span>` : `<span class="caret-sp"></span>`}<span class="heat-agents">${swatches}</span><span class="fpath" title="${escapeHtml(f.rel)}">${escapeHtml(f.rel)}</span></span>
+        <span class="heat-stat"><b>${f.reads}</b> reads${expandable ? ` · <b>${agents.length}</b> agents` : ""} · ${fmt(maxLine)} lines · peak <b style="color:${heatColor(maxC)}">${maxC}×</b></span>
+      </div>
+      ${heatStripHtml(svg, maxLine)}
+    </div>`;
+
+    if (expandable) {
+      h += `<div class="heat-split collapsed">`;
+      agents.forEach(g => {
+        const a = f.byAgent.get(g), id = ident.get(g);
+        const meta = `<div class="heat-submeta"><span class="heat-agent-icon" title="${escapeHtml(id.short)}">${id.icon}</span><span class="heat-agent-label" title="${escapeHtml(g)}">${escapeHtml(g)}</span><span class="muted"><b>${a.reads}</b> reads${a.spans.length ? ` · peak ${lineHeatStrip(a.spans, maxLine).maxC}×` : ""}</span></div>`;
+        const strip = a.spans.length ? heatStripHtml(lineHeatStrip(a.spans, maxLine).svg, maxLine) : `<div class="tagg-file-sub muted">whole-file reads (no line range)</div>`;
+        h += `<div class="heat-subrow" style="--ac:${id.color}">${meta}${strip}</div>`;
+      });
+      h += `</div>`;
+    }
+  });
+  if (noSpans.length) h += `<div class="tagg-file-sub muted" style="padding:8px 12px">${noSpans.length} whole-file read(s) without line ranges: ${escapeHtml(noSpans.slice(0, 8).map(f => f.rel).join(", "))}${noSpans.length > 8 ? "…" : ""}</div>`;
+  return h;
+}
+
+// Generic per-tool view for everything that isn't read_file: one row per invocation,
+// arg gist + result size, sortable by gist or time, expandable to full detail.
+function buildGenericPanel(bucket, ul) {
+  const events = bucketEvents(bucket);
+  const order = events.map((_, i) => i).sort((a, z) => (events[a].t || 0) - (events[z].t || 0));
+  const ident = stableAgentIdent(events);
+  let h = `<div class="tagg-file-head"><span><b>${events.length}</b> calls</span><span class="muted">click a row for full args &amp; result · click a ↕ header to sort</span></div>`;
+  h += `<table class="tagg-files"><colgroup><col class="c-num"><col class="c-time"><col class="c-file"><col class="c-res"><col class="c-dur"><col class="c-src"><col class="c-aic"></colgroup><thead><tr>
+    <th class="num" data-sort="ord" data-sort-type="num">#</th>
+    <th data-sort="t" data-sort-type="num">time</th>
+    <th data-sort="gist" data-sort-type="str">detail</th>
+    <th class="num" data-sort="res" data-sort-type="num">result</th>
+    <th class="num" data-sort="dur" data-sort-type="num">dur</th>
+    <th data-sort="src" data-sort-type="str">source</th>
+    <th class="num" data-sort="aic" data-sort-type="num">${ul}</th>
+  </tr></thead><tbody>`;
+  order.forEach((ei, ord) => {
+    const e = events[ei], inst = e.inst;
+    const gist = inst ? (summarizeArgs(inst.a || "") || "—") : "(request)";
+    const resLen = inst && inst.res ? inst.res.length : 0;
+    const dur = inst ? (inst.d || 0) : 0;
+    const exp = inst ? " expandable" : "";
+    const id = ident.get(e.grp);
+    const srcKey = (id ? id.short : e.grp || "") + " " + (e.dbg || "");
+    h += `<tr class="srow${exp}" data-ord="${ord}" data-t="${e.t || 0}" data-gist="${escapeHtml(gist.toLowerCase())}" data-res="${resLen}" data-dur="${dur}" data-src="${escapeHtml(srcKey.toLowerCase())}" data-aic="${e.aic || 0}">
+      <td class="num">${ord + 1}</td>
+      <td>${hms(e.t || 0)}</td>
+      <td>${inst ? `<span class="caret">▸</span>` : ""}<span class="fpath">${escapeHtml(gist)}</span></td>
+      <td class="num">${resLen ? qtyText(resLen) + "c" : "<span style='color:#444'>—</span>"}</td>
+      <td class="num">${dur ? dur + "ms" : ""}</td>
+      <td class="dbg">${agentBadgeHtml(id, e.grp)}${e.dbg ? ` <span class="dbgn">${escapeHtml(e.dbg)}</span>` : ""}</td>
+      <td class="num aic">${e.aic ? fmtAic(e.aic) : "<span style='color:#444'>—</span>"}</td>
+    </tr>`;
+    if (inst) h += `<tr class="srow-detail collapsed"><td colspan="7"><div class="tools-inner">${toolBlockHtml(inst)}</div></td></tr>`;
+  });
+  h += `</tbody></table>`;
+  return h;
+}
+
+// The overview rollup table (every tool, one row each, drill into callers → params).
+function buildOverviewPanel(list, ul) {
+  let h = `<table class="tagg"><thead><tr>
+    <th>tool</th><th class="num">calls</th><th class="num">uses</th>
+    <th class="num">new input</th><th class="num">uncached</th><th class="num">output</th><th class="num">${ul}</th>
+  </tr></thead><tbody>`;
+  if (!list.length) h += `<tr><td colspan="7" class="muted" style="padding:12px">no calls</td></tr>`;
+  list.forEach((b, bi) => {
+    h += `<tr class="tagg-tool expandable" data-k="t${bi}">
+      <td><span class="caret">▸</span><span class="tnm">${escapeHtml(b.name)}</span></td>
+      <td class="num">${b.nCallers}</td>
+      <td class="num">${b.uses}</td>
+      <td class="num">${fmt(b.sumNew)}</td>
+      <td class="num uncached">${fmt(b.sumUncached)}</td>
+      <td class="num">${fmt(b.sumOut)}</td>
+      <td class="num aic">${b.sumAic ? fmtAic(b.sumAic) : "<span style='color:#444'>—</span>"}</td>
+    </tr>`;
+    h += `<tr class="tagg-sub collapsed"><td colspan="7"><div class="tagg-sub-inner"><table class="tagg-callers"><thead><tr>
+      <th>t</th><th>source</th><th class="num">new input</th><th class="num">uncached</th><th class="num">output</th><th class="num">${ul}</th><th class="num">uses</th>
+    </tr></thead><tbody>`;
+    b.callers.forEach((c, ci) => {
+      const hasParams = c.instances.length > 0;
+      const dbgClass = c.compact ? "dbg compact" : "dbg";
+      h += `<tr class="tagg-caller${hasParams ? " expandable" : ""}" data-k="t${bi}-c${ci}">
+        <td>${hasParams ? `<span class="caret">▸</span>` : ""}${hms(c.t)}</td>
+        <td class="${dbgClass}">${escapeHtml(c.dbg || "")}${c.err ? ` <span style="color:#f85149" title="${escapeHtml(c.errMsg || "request failed")}">✕</span>` : ""} <span class="grp">${escapeHtml(c.grp)}</span></td>
+        <td class="num">${fmt(c.newInput)}</td>
+        <td class="num uncached">${fmt(c.uncached)}</td>
+        <td class="num">${fmt(c.out)}</td>
+        <td class="num aic">${c.aic ? fmtAic(c.aic) : "<span style='color:#444'>—</span>"}</td>
+        <td class="num">${c.instances.length}</td>
+      </tr>`;
+      if (hasParams) {
+        h += `<tr class="tagg-params collapsed"><td colspan="7"><div class="tools-inner">`;
+        c.instances.forEach(t => { h += toolBlockHtml(t); });
+        h += `</div></td></tr>`;
+      }
+    });
+    h += `</tbody></table></div></td></tr>`;
+  });
+  h += `</tbody></table>`;
+  return h;
+}
+
+function renderToolAgg(payload) {
+  const { list, totalNew, totalUncached, totalOut, totalAic } = computeToolAgg(payload);
+  const ul = unitLabel();
+
+  let h = `<div class="tagg-note"><b>new input</b> = each request's input delta vs. the previous request in the same agent (a shrunk context, e.g. just after a compaction, counts as 0). <b>uncached</b> = input − cached, i.e. the raw prompt size billed each request. Tokens are attributed to every tool a request invoked, so requests calling multiple tools are counted under each — column totals can exceed the session totals below.</div>`;
+  h += `<div class="tagg-totals"><span>session new input <b>${qty(totalNew)}</b></span><span>uncached <b style="color:#f85149">${qty(totalUncached)}</b></span><span>output <b>${qty(totalOut)}</b></span><span>${ul} <b style="color:#56d364">${fmtAic(totalAic)}</b></span></div>`;
+
+  // Segmented tabs: overview + one per tool, drilling into a dedicated per-tool view.
+  let tabs = `<div class="tagg-tabs"><button type="button" class="tagg-tab active" data-tab="overview" data-name="overview">overview</button>`;
+  list.forEach((b, bi) => { tabs += `<button type="button" class="tagg-tab" data-tab="t${bi}" data-name="${escapeHtml(b.name)}">${escapeHtml(b.name)} <span class="tcount">${b.uses}</span></button>`; });
+  tabs += `</div>`;
+
+  let panels = `<div class="tagg-panel" data-tab="overview">${buildOverviewPanel(list, ul)}</div>`;
+  list.forEach((b, bi) => {
+    const inner = b.name === "read_file" ? buildFilePanel(b, ul) : buildGenericPanel(b, ul);
+    panels += `<div class="tagg-panel" data-tab="t${bi}" hidden>${inner}</div>`;
+  });
+
+  return h + tabs + panels;
+}
+
+// ---------- "By file" aggregate view ----------
+// Groups every file-touching tool invocation (read_file, apply_patch, create_file,
+// get_errors, …) by the file it acted on, so a session reads as "what got touched and
+// how often" instead of turn-by-turn. A heatmap mode renders one line-coverage strip
+// per ACTION per file, so you can see where in the file each kind of action landed.
+
+// All file paths a tool invocation acted on. Extends toolFilePath to multi-file args
+// (get_errors filePaths, runTests files) and apply_patch's inline patch headers.
+function toolFilePaths(argStr) {
+  const s = String(argStr ?? "").trim();
+  if (s[0] !== "{") return [];
+  let o;
+  try { o = JSON.parse(s); } catch (_) { return []; }
+  const single = o.filePath || o.path || o.file || o.target_file || o.absolute_path || o.relativePath;
+  if (single) return [String(single)];
+  for (const k of ["filePaths", "files"]) {
+    if (Array.isArray(o[k])) return o[k].filter(p => typeof p === "string");
+  }
+  // apply_patch: paths live in the patch text ("*** Update File: /path", Add/Delete too)
+  if (typeof o.input === "string" && o.input.includes("*** Begin Patch")) {
+    const out = [];
+    const re = /^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm;
+    let m;
+    while ((m = re.exec(o.input)) !== null) out.push(m[1].trim());
+    return out;
+  }
+  return [];
+}
+
+// Flatten the session into one event per (tool invocation × file it touched), tagged
+// with the same group labels computeToolAgg uses so agent identity stays consistent.
+function collectFileEvents(payload) {
+  const groups = [{ grp: "foreground", calls: payload.main || [] }];
+  (payload.kids || []).forEach((k, ki) => {
+    const grp = k.is_search_child
+      ? `🔍 search-subagent ${k.child_sid ? k.child_sid.slice(0, 8) : ""}`
+      : `sub-agent: ${k.label || ("K" + ki)}`;
+    groups.push({ grp, calls: k.calls || [] });
+  });
+  const events = [];
+  let skipped = 0;
+  groups.forEach(g => g.calls.forEach(c => (c.tools || []).forEach(t => {
+    const paths = toolFilePaths(t.a);
+    if (!paths.length) { skipped++; return; }
+    paths.forEach(path => events.push({
+      path, tool: t.n || "?", t: t.t != null ? t.t : c.t, grp: g.grp, dbg: c.dbg,
+      span: parseRange(t.a), range: fileRange(t.a),
+      resLen: t.res ? t.res.length : 0, dur: t.d || 0, inst: t,
+    }));
+  })));
+  return { events, skipped };
+}
+
+// Stable color per action (tool name), assigned by frequency so the dominant actions
+// get the first palette slots in every part of the view.
+function toolColorMap(events) {
+  const counts = new Map();
+  events.forEach(e => counts.set(e.tool, (counts.get(e.tool) || 0) + 1));
+  const names = [...counts.keys()].sort((a, z) => counts.get(z) - counts.get(a));
+  const map = new Map();
+  names.forEach((n, i) => map.set(n, PALETTE[i % PALETTE.length]));
+  return map;
+}
+
+function toolChipHtml(name, count, col) {
+  return `<span class="ftool-chip" style="--tc:${col}">${escapeHtml(name)}${count != null ? ` <b>${count}</b>` : ""}</span>`;
+}
+
+// File summary table: one row per file with per-action counts and a small-multiple
+// strip showing WHICH line regions the actions covered (heat = same lines re-touched);
+// a row expands to the full time-ordered list of every action on that file (args + result).
+function buildFileAggTable(files, toolCol, ident) {
+  let h = `<div class="tagg-file-sub muted">click a row for every action on that file · click a ↕ header to sort · regions strip: line coverage, cool→hot as the same lines are re-touched (hover a band for its range)</div>`;
+  h += `<table class="tagg-files fagg-tbl"><colgroup><col class="c-num"><col class="c-file"><col class="c-reads"><col class="c-chips"><col class="c-regions"><col class="c-res"><col class="c-dur"><col class="c-src"></colgroup><thead><tr>
+    <th class="num" data-sort="ord" data-sort-type="num">#</th>
+    <th data-sort="file" data-sort-type="str">file</th>
+    <th class="num" data-sort="n" data-sort-type="num">actions</th>
+    <th data-sort="tools" data-sort-type="str">by action</th>
+    <th data-sort="lines" data-sort-type="num">regions</th>
+    <th class="num" data-sort="res" data-sort-type="num">result</th>
+    <th class="num" data-sort="dur" data-sort-type="num">dur</th>
+    <th data-sort="src" data-sort-type="str">agents</th>
+  </tr></thead><tbody>`;
+  files.forEach((f, fi) => {
+    const chips = [...f.byTool.entries()].sort((a, z) => z[1].length - a[1].length)
+      .map(([n, evs]) => toolChipHtml(n, evs.length, toolCol.get(n))).join(" ");
+    const agents = [...f.agents].map(g => {
+      const id = ident.get(g);
+      return `<i class="heat-swatch" style="background:${id ? id.color : "#444"}" title="${escapeHtml(g)}">${id ? id.icon : "?"}</i>`;
+    }).join("");
+    const toolKey = [...f.byTool.keys()].sort().join(" ");
+    // mini coverage strip across the file's known line range; actions without ranges
+    // (patches, whole-file reads) don't contribute bands.
+    const spans = f.events.map(e => e.span).filter(Boolean);
+    const maxLine = spans.length ? Math.max(...spans.map(s => s.end)) : 0;
+    const regions = maxLine
+      ? `<span class="mini-heat" title="${spans.length} ranged action${spans.length > 1 ? "s" : ""} over ~${fmt(maxLine)} lines">${lineHeatStrip(spans, maxLine).svg}<span class="mini-heat-max">${fmt(maxLine)}</span></span>`
+      : `<span style="color:#444">—</span>`;
+    h += `<tr class="srow expandable" data-ord="${fi}" data-file="${escapeHtml(f.rel.toLowerCase())}" data-n="${f.events.length}" data-tools="${escapeHtml(toolKey.toLowerCase())}" data-lines="${maxLine}" data-res="${f.res}" data-dur="${f.dur}" data-src="${escapeHtml([...f.agents].join(" ").toLowerCase())}">
+      <td class="num">${fi + 1}</td>
+      <td><span class="caret">▸</span><span class="fpath${f.ext ? " ext" : ""}" title="${escapeHtml(f.path)}">${f.ext ? "↗ " : ""}${escapeHtml(f.rel)}</span></td>
+      <td class="num">${f.events.length}</td>
+      <td class="fchips">${chips}</td>
+      <td class="fregions">${regions}</td>
+      <td class="num">${f.res ? qtyText(f.res) + "c" : "<span style='color:#444'>—</span>"}</td>
+      <td class="num">${f.dur ? f.dur + "ms" : ""}</td>
+      <td class="fagents">${agents}</td>
+    </tr>`;
+    let inner = "";
+    f.events.forEach(e => {
+      const id = ident.get(e.grp);
+      inner += `<div class="fagg-evt"><span class="fagg-t">${hms(e.t)}</span>${toolChipHtml(e.tool, null, toolCol.get(e.tool))}${e.range ? `<span class="frange">${escapeHtml(e.range)}</span>` : ""}${agentBadgeHtml(id, e.grp)}</div>${toolBlockHtml(e.inst)}`;
+    });
+    h += `<tr class="srow-detail collapsed"><td colspan="8"><div class="tools-inner">${inner}</div></td></tr>`;
+  });
+  h += `</tbody></table>`;
+  return h;
+}
+
+function renderFileAgg(payload) {
+  const { events, skipped } = collectFileEvents(payload);
+  if (!events.length) return `<div class="tagg-file-sub muted" style="padding:16px 12px">No file-touching tool calls in this session.</div>`;
+  const root = guessRoot(events.map(e => e.path));
+  events.forEach(e => { e.rel = relTo(root, e.path); e.ext = !underRoot(root, e.path); });
+  const ident = stableAgentIdent(events);
+  const toolCol = toolColorMap(events);
+
+  const fileMap = new Map();
+  events.forEach(e => {
+    let f = fileMap.get(e.rel);
+    if (!f) { f = { rel: e.rel, path: e.path, ext: e.ext, events: [], byTool: new Map(), agents: new Set(), res: 0, dur: 0 }; fileMap.set(e.rel, f); }
+    f.events.push(e); f.agents.add(e.grp); f.res += e.resLen; f.dur += e.dur;
+    if (!f.byTool.has(e.tool)) f.byTool.set(e.tool, []);
+    f.byTool.get(e.tool).push(e);
+  });
+  const files = [...fileMap.values()].sort((a, z) => z.events.length - a.events.length || a.rel.localeCompare(z.rel));
+  files.forEach(f => f.events.sort((a, z) => a.t - z.t));
+
+  const toolSummary = [...toolCol.entries()].map(([n, col]) =>
+    toolChipHtml(n, events.filter(e => e.tool === n).length, col)).join(" ");
+
+  let h = `<div class="tagg-file-head"><span>root <code>${root ? escapeHtml(root) : "—"}</code></span><span><b>${files.length}</b> files · <b>${events.length}</b> actions${skipped ? ` · <span class="muted">${skipped} tool calls without a file path not shown</span>` : ""}</span></div>`;
+  h += `<div class="tagg-file-head fagg-tools">${toolSummary}</div>`;
+  h += buildFileAggTable(files, toolCol, ident);
+  return h;
 }
 
 // ---------- Click-to-select chart ↔ table ----------
@@ -579,8 +1227,138 @@ function wireExpand(rightEl) {
   });
 }
 
+// Toggle between the per-turn table, by-tool, and by-file views inside the detail pane.
+// The choice is global state (DVIEW, URL-persisted) so every session opens to the same view.
+function wireDetailViews(rightEl) {
+  const btns = [...rightEl.querySelectorAll(".dview-btn")];
+  function activate(v, save) {
+    const btn = btns.find(b => b.dataset.dview === v) || btns[0];
+    if (!btn) return;
+    btns.forEach(b => b.classList.toggle("active", b === btn));
+    rightEl.querySelectorAll(".dview").forEach(d => { d.hidden = d.dataset.dview !== btn.dataset.dview; });
+    if (save) { DVIEW = btn.dataset.dview; syncUrl(); }
+  }
+  btns.forEach(btn => btn.addEventListener("click", () => activate(btn.dataset.dview, true)));
+  if (DVIEW !== "turns") activate(DVIEW, false);
+}
+
+// Progressive disclosure for the by-tool view: click a tool row to reveal its callers,
+// click a caller row to reveal that tool's params/result. (The inner per-tool blocks
+// reuse the same markup as the turns table, so wireExpand handles their second level.)
+function wireToolAgg(rightEl) {
+  rightEl.querySelectorAll("tr.tagg-tool.expandable, tr.tagg-caller.expandable").forEach(row => {
+    row.addEventListener("click", e => {
+      const next = row.nextElementSibling;
+      if (!next || !(next.classList.contains("tagg-sub") || next.classList.contains("tagg-params"))) return;
+      e.stopPropagation();
+      const nowCollapsed = next.classList.toggle("collapsed");
+      row.classList.toggle("expanded", !nowCollapsed);
+    });
+  });
+}
+
+// Segmented tool tabs: switch which per-tool panel is visible within the by-tool view.
+// The selected TOOL NAME (not index) persists via DTAB, so opening another session lands
+// on the same tool's tab when that session has it (else overview).
+function wireToolTabs(rightEl) {
+  rightEl.querySelectorAll(".tagg-tabs").forEach(tabsEl => {
+    const wrap = tabsEl.parentElement;
+    const btns = [...tabsEl.querySelectorAll(".tagg-tab")];
+    const panels = [...wrap.querySelectorAll(".tagg-panel")];
+    function activate(btn, save) {
+      const tab = btn.dataset.tab;
+      btns.forEach(b => b.classList.toggle("active", b === btn));
+      panels.forEach(p => { p.hidden = p.dataset.tab !== tab; });
+      if (save) { DTAB = btn.dataset.name || "overview"; syncUrl(); }
+    }
+    btns.forEach(btn => btn.addEventListener("click", () => activate(btn, true)));
+    if (DTAB !== "overview") {
+      const btn = btns.find(b => b.dataset.name === DTAB);
+      if (btn) activate(btn, false);
+    }
+  });
+}
+
+// Table ⇄ line-heatmap toggle inside the read_file panel; persists via RFVIEW/the URL.
+function wireRfViews(rightEl) {
+  rightEl.querySelectorAll(".rf-toggle").forEach(toggle => {
+    const wrap = toggle.parentElement;
+    const btns = [...toggle.querySelectorAll(".rf-btn")];
+    const views = [...wrap.querySelectorAll(":scope > .rf-view")];
+    function activate(v, save) {
+      if (!btns.some(b => b.dataset.rfview === v)) return;
+      btns.forEach(b => b.classList.toggle("active", b.dataset.rfview === v));
+      views.forEach(view => { view.hidden = view.dataset.rfview !== v; });
+      if (save) { RFVIEW = v; syncUrl(); }
+    }
+    btns.forEach(btn => btn.addEventListener("click", () => activate(btn.dataset.rfview, true)));
+    if (RFVIEW !== "table") activate(RFVIEW, false);
+  });
+}
+
+// Click a multi-agent file in the heatmap to expand/collapse its per-agent split.
+// Each file toggles independently.
+function wireHeatExpand(rightEl) {
+  rightEl.querySelectorAll(".heat-file.expandable").forEach(row => {
+    row.addEventListener("click", () => {
+      const split = row.nextElementSibling;
+      if (!split || !split.classList.contains("heat-split")) return;
+      const collapsed = split.classList.toggle("collapsed");
+      row.classList.toggle("expanded", !collapsed);
+    });
+  });
+}
+
+// Click-to-expand rows in the per-tool file/invocation tables (params + result).
+function wireFileRows(rightEl) {
+  rightEl.querySelectorAll("tr.srow.expandable").forEach(row => {
+    row.addEventListener("click", e => {
+      const d = row.nextElementSibling;
+      if (!d || !d.classList.contains("srow-detail")) return;
+      e.stopPropagation();
+      const collapsed = d.classList.toggle("collapsed");
+      row.classList.toggle("expanded", !collapsed);
+    });
+  });
+}
+
+// Make a table with th[data-sort] click-sortable, keeping each row's expandable
+// detail sibling glued to it. Re-sorts the existing DOM rows (no re-render).
+function wireSortable(table) {
+  const tbody = table.tBodies[0];
+  if (!tbody) return;
+  let curKey = null, curDir = 1;
+  const headers = [...table.querySelectorAll("th[data-sort]")];
+  headers.forEach(th => {
+    th.classList.add("sortable");
+    th.addEventListener("click", () => {
+      const key = th.dataset.sort;
+      const numeric = th.dataset.sortType === "num";
+      if (curKey === key) curDir = -curDir; else { curKey = key; curDir = 1; }
+      headers.forEach(h => h.removeAttribute("data-dir"));
+      th.setAttribute("data-dir", curDir > 0 ? "asc" : "desc");
+      // pair each main row with its (optional) detail row
+      const pairs = [];
+      [...tbody.children].forEach(tr => {
+        if (tr.classList.contains("srow")) pairs.push({ main: tr, detail: null });
+        else if (pairs.length && tr.classList.contains("srow-detail")) pairs[pairs.length - 1].detail = tr;
+      });
+      pairs.sort((a, z) => {
+        const av = a.main.dataset[key] ?? "", zv = z.main.dataset[key] ?? "";
+        return (numeric ? (Number(av) - Number(zv)) : String(av).localeCompare(String(zv))) * curDir;
+      });
+      pairs.forEach(p => { tbody.appendChild(p.main); if (p.detail) tbody.appendChild(p.detail); });
+    });
+  });
+}
+
 // ---------- Modal ----------
 let MODAL_SID = null;
+// Detail-view toggle state. Global (not per-session) so the same view — e.g. "by tool →
+// read_file → heatmap" — greets you in every session you open, and survives via the URL.
+let DVIEW = "turns";    // "turns" | "tools" | "files"
+let DTAB = "overview";  // by-tool tab: "overview" or a tool name (falls back if absent)
+let RFVIEW = "table";   // read_file panel: "table" | "heatmap"
 
 async function openModal(sid, maxTok) {
   const modal = document.getElementById("modal");
@@ -620,6 +1398,13 @@ async function openModal(sid, maxTok) {
     <span class="muted">click a dot or row to select</span>`;
   wireSelect(chartHolder.querySelector("svg"), right);
   wireExpand(right);
+  wireDetailViews(right);
+  wireToolAgg(right);
+  wireToolTabs(right);
+  wireRfViews(right);
+  wireHeatExpand(right);
+  wireFileRows(right);
+  right.querySelectorAll("table.tagg-files").forEach(wireSortable);
   stickCallsHeader(right);
 }
 
@@ -721,7 +1506,7 @@ const HELP_FEATURES = [
   { name: "Combine sub-agents", desc: "Fold sub-agent tokens into their parent (default), or split each sub-agent out as its own independent row/card." },
   { name: "AIC ↔ $", desc: "Show cost as Copilot AIC credits or US dollars, at the fixed 100 AIC = $1 rate. Applies everywhere at once." },
   { name: "Detail modal", desc: "Click a card/row to open per-turn detail. Click a chart dot or table row to highlight the matching turn." },
-  { name: "Shareable URL", desc: "Every control, the open calendar, and the open session are encoded in the URL — copy it to share the exact view." },
+  { name: "Shareable URL", desc: "Every control, the open calendar, the open session, and the detail-view toggles (turns / by tool / by file, tabs, heatmaps) are encoded in the URL — copy it to share the exact view; the toggles also carry over to the next session you open." },
 ];
 
 const HELP_COLORS = [
@@ -778,6 +1563,13 @@ function renderHelp() {
   const detail = document.getElementById("helpDetail");
   detail.innerHTML = renderDetail(payload);
   wireExpand(detail);
+  wireDetailViews(detail);
+  wireToolAgg(detail);
+  wireToolTabs(detail);
+  wireRfViews(detail);
+  wireHeatExpand(detail);
+  wireFileRows(detail);
+  detail.querySelectorAll("table.tagg-files").forEach(wireSortable);
 
   // Static reference cards.
   document.getElementById("helpFeatures").innerHTML = HELP_FEATURES.map(f =>
@@ -883,7 +1675,8 @@ endEl.addEventListener("change", () => { RANGE_PINNED = false; updateRangeInfo()
 // shared link) restores the exact view. Pinned "last N hours" windows persist as
 // hours=N (re-anchored to now on load); explicit windows persist as start/end
 // unix timestamps. Params at their defaults are omitted to keep URLs clean.
-const URL_DEFAULTS = { hours: 24, sort: "total_input", limit: "50", min_tokens: "0", view: "charts", combine: "1", unit: "aic" };
+const URL_DEFAULTS = { hours: 24, sort: "total_input", limit: "50", min_tokens: "0", view: "charts", combine: "1", unit: "aic",
+  dview: "turns", dtab: "overview", rfview: "table" };
 let SUPPRESS_URL = false; // true while restoring state FROM the URL
 
 function syncUrl(push = false) {
@@ -909,6 +1702,11 @@ function syncUrl(push = false) {
   if (CAL_SELECTED) p.set("day", CAL_SELECTED);
   if (!calPop.hidden) { p.set("cal", "1"); p.set("cal_year", String(CAL_YEAR)); }
   if (MODAL_SID) p.set("session", MODAL_SID);
+  // Detail-view toggles persist even with no modal open, so the next session opened
+  // (here or from a shared link) lands on the same view.
+  if (DVIEW !== URL_DEFAULTS.dview) p.set("dview", DVIEW);
+  if (DTAB !== URL_DEFAULTS.dtab) p.set("dtab", DTAB);
+  if (RFVIEW !== URL_DEFAULTS.rfview) p.set("rfview", RFVIEW);
   if (HELP_OPEN) p.set("help", "1");
   const qs = p.toString();
   const url = qs ? `${location.pathname}?${qs}` : location.pathname;
@@ -941,6 +1739,10 @@ function applyUrlState() {
     const calYear = Number(p.get("cal_year"));
     if (calYear) CAL_YEAR = calYear;
     if (p.get("cal") === "1") openCal(); else closeCal();
+    // detail-view toggles BEFORE openModal so the restored modal renders with them
+    DVIEW = ["turns", "tools", "files"].includes(p.get("dview")) ? p.get("dview") : URL_DEFAULTS.dview;
+    DTAB = p.get("dtab") || URL_DEFAULTS.dtab;
+    RFVIEW = p.get("rfview") === "heatmap" ? "heatmap" : URL_DEFAULTS.rfview;
     const sid = p.get("session");
     if (sid && sid !== MODAL_SID) openModal(sid);
     else if (!sid && MODAL_SID) closeModal();
