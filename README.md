@@ -1,6 +1,8 @@
 # data-viz-copilot-usage
 
-Interactive web viewer for VS Code Copilot chat token usage. Reads the local debug-logs that the Copilot extension writes under VS Code's `workspaceStorage` directory (`<workspaceStorage>/<wsid>/GitHub.copilot-chat/debug-logs/`) and turns each session into a small-multiple chart of cumulative token use over time, with a drill-in modal showing every LLM call and the tool invocations that fed it.
+Interactive web viewer for VS Code Copilot and Codex coding-session token usage. It reads local Copilot debug logs and Codex rollout logs, then turns each session into a small-multiple chart of cumulative token use over time, with a drill-in modal showing every LLM call and the tool invocations that fed it.
+
+Copilot data comes from the debug logs that the Copilot extension writes under VS Code's `workspaceStorage` directory (`<workspaceStorage>/<wsid>/GitHub.copilot-chat/debug-logs/`). Codex data comes from `CODEX_HOME` (or `~/.codex`), using `sessions/**/*.jsonl` for per-turn usage and `state_5.sqlite` for thread titles, source metadata, and spawned-subagent parentage.
 
 The log location is auto-detected per platform:
 
@@ -10,7 +12,7 @@ The log location is auto-detected per platform:
 | Linux    | `$XDG_CONFIG_HOME/Code/User/workspaceStorage` (default `~/.config/...`) |
 | Windows  | `%APPDATA%\Code\User\workspaceStorage`                                  |
 
-Using VS Code Insiders, VSCodium, or a portable install? Point the `COPILOT_USAGE_STORAGE` env var at the equivalent `workspaceStorage` directory.
+Using VS Code Insiders, VSCodium, or a portable install? Point the `COPILOT_USAGE_STORAGE` env var at the equivalent `workspaceStorage` directory. Using a non-default Codex home? Point `CODEX_USAGE_HOME` or `CODEX_HOME` at that directory.
 
 ## Visuals
 
@@ -40,9 +42,9 @@ The `table` toggle swaps the grid for a sortable rollup, one row per thread: mod
 
 ![](docs/img/table-rollup.png)
 
-### AIC calendar
+### Usage calendar
 
-The 📅 calendar is a GitHub-style year heatmap of daily spend. Click a day to filter the view to it; the unit toggle switches between AIC credits and dollars.
+The 📅 calendar is a GitHub-style year heatmap. In Copilot-only mode it shows daily AIC spend, and the unit toggle switches between AIC credits and dollars. In Codex or mixed-source mode it shows daily input tokens, because Codex rollout logs do not expose exact AIC or dollar cost.
 
 ![](docs/img/calendar.png)
 
@@ -73,24 +75,28 @@ uv will create `.venv/` and install Flask on the first run; subsequent runs are 
 ## What you see
 
 - **Default view**: top 50 sessions from the last 24h, sorted by total input tokens.
-- **Filters** in the header: time window (1h … 90d), sort key, top-N cap, minimum-token floor.
+- **Filters** in the header: data source (`all` / `Copilot` / `Codex`), time window (1h … 90d), sort key, top-N cap, minimum-token floor.
 - **Each card**: a small line chart. y = cumulative input tokens (shared scale across all cards in the result set so the heaviest hitter fills the frame). x = wall-clock time from first activity (per-card scale). Solid blue = the foreground `panel/editAgent` chat. Dashed colored lines = sub-agents (`runSubagent-*`). Orange diamonds = compaction events (`summarizeConversationHistory*`, `summarizeVirtualTools`). Dot size encodes per-turn input tokens. Dot color encodes cache hit on that turn (blue ≥70% / amber 30–70% / red <30%).
 - **Click a card** → fullscreen modal with the chart on the left and a per-turn detail table on the right. Hover any dot to highlight (and scroll to) the matching row, and vice versa. Each row shows debugName, reasoning level, input/cached/output, cache-hit bar, and the tools that fired before that turn.
-- **`charts` / `table` toggle** (below the controls): switch the result set between the small-multiples grid and a tabular rollup — one row per thread (session), with columns for model, reasoning level, request count, input/cached/cache%/output tokens, AIC, and duration. Click a column header to sort; click a row to open the same detail modal as a card. The active view persists in the URL (`?view=table`).
-- **Reasoning level** is the requested effort, *not* a token count — VS Code Copilot doesn't log reasoning tokens separately (they're folded into `output`). It's read from each request's `requestOptions`: OpenAI `reasoning.effort` (`low`/`medium`/`high`/`xhigh`) or Anthropic `thinking.budget_tokens` (shown as `think:16k`). The pill is color-ramped low→high so different reasoning levels are comparable at a glance.
+- **`charts` / `table` toggle** (below the controls): switch the result set between the small-multiples grid and a tabular rollup — one row per thread (session), with columns for model, reasoning level, request count, input/cached/cache%/output tokens, available cost, and duration. Click a column header to sort; click a row to open the same detail modal as a card. The active view persists in the URL (`?view=table`).
+- **Reasoning level** is the requested effort, *not* a token count. Copilot reads it from each request's `requestOptions`; Codex reads it from the rollout `turn_context.effort`. Codex reasoning-output token counts are included in detail payloads, but not shown as a separate default table column.
+- **Codex subagents** are folded into parent Codex threads by default using `thread_spawn_edges`; guardian/internal review threads are hidden from the default Codex view.
 
 ## Endpoints
 
 - `GET /` — UI
-- `GET /api/sessions?since_hours=24&min_tokens=0&limit=50&sort=total_input` — list of session summaries (no per-tool detail)
-- `GET /api/session/<sid>` — full detail for one session (every LLM call and its preceding tool invocations)
-- `GET /api/stats?since_hours=24` — high-level rollup
+- `GET /api/sessions?source=all&since_hours=24&min_tokens=0&limit=50&sort=total_input` — list of session summaries (no per-tool detail)
+- `GET /api/session/<source:sid>` — full detail for one session (every LLM call and its preceding tool invocations)
+- `GET /api/daily_usage?source=all` — daily selected metric (`AIC` for Copilot-only, input tokens for Codex/all)
+- `GET /api/stats?source=all&since_hours=24` — high-level rollup
 
-`sort` values: `total_input` · `recent` · `uncached` · `requests` · `duration`.
+`source` values: `all` · `copilot` · `codex`. `sort` values: `total_input` · `recent` · `uncached` · `requests` · `duration` · `aic` (`aic` maps to usage for Codex, since exact cost is unavailable).
 
 ## How it works
 
-`analyzer.py` discovers `main.jsonl` files via the workspaceStorage glob. For each session it parses the foreground log plus any sibling `*.jsonl` files (those are child sessions — `runSubagent-*` and `title-*`). Files are cached in-memory keyed by mtime so repeated queries are cheap. The frontend renders SVG directly in the browser from the JSON payload so filtering is responsive.
+`analyzer.py` discovers Copilot `main.jsonl` files via the workspaceStorage glob. For each session it parses the foreground log plus any sibling `*.jsonl` files (those are child sessions — `runSubagent-*` and `title-*`). For Codex, it uses `state_5.sqlite` as the thread index and parses rollout JSONL `token_count` events for per-turn usage. Files are cached in-memory keyed by mtime where useful, and daily Codex token totals are disk-cached by rollout mtime/size. The frontend renders SVG directly in the browser from the JSON payload so filtering is responsive.
+
+For the implementation write-up and the repeatable process for adding more agent sources, see [docs/agent-source-integration-guide.md](docs/agent-source-integration-guide.md).
 
 ## Notes
 

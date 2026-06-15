@@ -33,6 +33,11 @@ h1 { font-weight: 600; margin: 0 0 8px; font-size: 18px; }
 #controls .quick-group .quick:first-child { border-top-left-radius: 4px; border-bottom-left-radius: 4px; }
 #controls .quick-group .quick:last-child { border-top-right-radius: 4px; border-bottom-right-radius: 4px; border-right-width: 1px; }
 #controls .quick-group .quick.active { background: var(--blue); color: white; border-color: var(--blue); }
+#controls .source-group { display: inline-flex; }
+#controls .source-group .source-btn { font-family: ui-monospace, monospace; padding: 0 9px; min-width: 42px; border-radius: 0; border-right-width: 0; }
+#controls .source-group .source-btn:first-child { border-top-left-radius: 4px; border-bottom-left-radius: 4px; }
+#controls .source-group .source-btn:last-child { border-top-right-radius: 4px; border-bottom-right-radius: 4px; border-right-width: 1px; }
+#controls .source-group .source-btn.active { background: var(--blue); color: white; border-color: var(--blue); font-weight: 600; }
 #controls #prevBtn, #controls #nextBtn { font-size: 12px; padding: 0 8px; }
 #controls .sep { font-size: 11px; }
 #controls .vsep { width: 1px; height: 18px; background: var(--border); margin: 0 4px; }
@@ -54,7 +59,7 @@ h1 { font-weight: 600; margin: 0 0 8px; font-size: 18px; }
 .star { display: inline-block; width: 12px; height: 12px; background: #ffd33d;
   clip-path: polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%); }
 
-/* Daily AIC calendar (popover off the date controls) */
+/* Daily usage calendar (popover off the date controls) */
 header { position: relative; }
 .cal-pop { position: absolute; top: 100%; left: 0; right: 0; z-index: 40; margin-top: 4px; padding: 8px 10px; background: var(--panel); border: 1px solid #444c56; border-radius: 6px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6); }
 #calTrigger.active { background: var(--blue); color: white; border-color: var(--blue); }
@@ -113,6 +118,9 @@ table.rollup tr.trow:hover .t-thread { color: var(--blue); }
 .t-time { color: var(--mute); font-family: ui-monospace, monospace; font-size: 11px; }
 .t-model { color: var(--purple); font-family: ui-monospace, monospace; }
 .t-thread { display: inline-block; max-width: 46vw; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.source-pill { display: inline-block; margin-right: 6px; padding: 1px 5px; border-radius: 8px; border: 1px solid #444c56; color: #8b949e; font: 10px ui-monospace, monospace; vertical-align: 1px; }
+.source-pill.codex { color: #56d364; border-color: #2f6f45; background: rgba(46, 160, 67, 0.12); }
+.source-pill.copilot { color: #79c0ff; border-color: #1f5da3; background: rgba(88, 166, 255, 0.12); }
 .t-cache { white-space: nowrap; color: var(--mute); }
 .num.t-cached-sub { color: var(--mute); font-weight: 400; }
 table.rollup td.num { text-align: right; font-variant-numeric: tabular-nums; }

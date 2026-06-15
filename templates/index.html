@@ -2,19 +2,19 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Copilot usage viewer</title>
+<title>AI usage viewer</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header>
-  <h1>Copilot usage <span id="banner-stats" class="muted"></span></h1>
+  <h1>AI usage <span id="banner-stats" class="muted"></span></h1>
   <form id="controls">
     <button type="button" id="prevBtn" title="Step backward by current range">◀</button>
     <input type="datetime-local" id="start_date" title="Start">
     <span class="sep muted">→</span>
     <input type="datetime-local" id="end_date" title="End">
     <button type="button" id="nextBtn" title="Step forward by current range">▶</button>
-    <button type="button" id="calTrigger" title="AIC calendar — pick a day">📅 AIC</button>
+    <button type="button" id="calTrigger" title="Usage calendar — pick a day">📅 input</button>
     <span class="muted small" id="rangeInfo"></span>
     <span class="vsep"></span>
     <div class="quick-group">
@@ -27,9 +27,15 @@
       <button type="button" class="quick" data-hours="2160">90d</button>
     </div>
     <span class="vsep"></span>
+    <div class="source-group" id="sourceToggle" title="Data source">
+      <button type="button" class="source-btn active" data-source="all">all</button>
+      <button type="button" class="source-btn" data-source="copilot">Copilot</button>
+      <button type="button" class="source-btn" data-source="codex">Codex</button>
+    </div>
+    <span class="vsep"></span>
     <select name="sort" id="sort" title="Sort">
       <option value="total_input" selected>by total input</option>
-      <option value="aic">by AIC</option>
+      <option value="aic">by usage metric</option>
       <option value="recent">by most recent</option>
       <option value="uncached">by uncached input</option>
       <option value="requests">by request count</option>
@@ -98,7 +104,7 @@
   <div class="help-body">
     <div class="help-head">
       <h2>What am I looking at?</h2>
-      <p class="muted">This viewer charts your Copilot chat sessions — every request, sub-agent, and compaction — so you can see where tokens and cost (AIC credits) go. Below is a <b>live demo session</b>: one main agent that spawned two sub-agents. Everything here is interactive.</p>
+      <p class="muted">This viewer charts your Copilot and Codex coding sessions — every request, sub-agent, and compaction — so you can see where tokens and available cost metrics go. Below is a <b>live demo session</b>: one main agent that spawned two sub-agents. Everything here is interactive.</p>
     </div>
 
     <div class="help-section">

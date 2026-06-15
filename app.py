@@ -1,4 +1,4 @@
-"""Flask web app for browsing VS Code Copilot chat token usage.
+"""Flask web app for browsing Copilot and Codex coding-session token usage.
 
 Run:
     uv run app.py              # defaults to port 5057
@@ -7,7 +7,7 @@ Run:
 Then open http://localhost:5057
 """
 from __future__ import annotations
-import argparse, os, time
+import argparse, time
 from flask import Flask, jsonify, request, render_template, abort
 
 import analyzer
@@ -31,6 +31,8 @@ def api_sessions():
     min_tokens = int(request.args.get("min_tokens", 0) or 0)
     limit = int(request.args.get("limit", 50) or 50)
     sort = request.args.get("sort", "total_input")
+    source = request.args.get("source", "all")
+    source = source if source in analyzer.SOURCES else "all"
     t0 = time.time()
     sessions = analyzer.query_sessions(
         since_seconds=since_hours * 3600 if since_hours is not None and start_ts is None and end_ts is None else None,
@@ -39,6 +41,7 @@ def api_sessions():
         min_tokens=min_tokens,
         limit=limit,
         sort=sort,
+        source=source,
     )
     payload = [analyzer.session_summary(s) for s in sessions]
     def peak(s):
@@ -67,7 +70,20 @@ def api_sessions():
         "min_tokens": min_tokens,
         "limit": limit,
         "sort": sort,
+        "source": source,
     })
+
+
+@app.route("/api/daily_usage")
+def api_daily_usage():
+    """Daily selected metric for a source: Copilot AIC, Codex/all input tokens."""
+    source = request.args.get("source", "copilot")
+    source = source if source in analyzer.SOURCES else "copilot"
+    t0 = time.time()
+    payload = analyzer.daily_usage(source)
+    payload["took_ms"] = int((time.time() - t0) * 1000)
+    payload["source"] = source
+    return jsonify(payload)
 
 
 @app.route("/api/daily_aic")
@@ -80,16 +96,10 @@ def api_daily_aic():
 
 @app.route("/api/session/<sid>")
 def api_session(sid):
-    """Return detailed payload for one session. We scan recent main.jsonl files to find it."""
-    # widest window since we don't know sid's age — 90 days
-    paths = analyzer.discover_main_files(90 * 86400)
-    for fp in paths:
-        if os.path.basename(os.path.dirname(fp)) == sid:
-            s = analyzer.assemble_session(fp)
-            if s:
-                analyzer.link_search_parents([s])
-                analyzer.absorb_search_children(s)
-                return jsonify(analyzer.session_detail(s))
+    """Return detailed payload for one namespaced Copilot/Codex session id."""
+    s = analyzer.get_session(sid, request.args.get("source", "all"))
+    if s:
+        return jsonify(analyzer.session_detail(s))
     abort(404)
 
 
@@ -97,13 +107,16 @@ def api_session(sid):
 def api_stats():
     """High-level rollup over the last N hours."""
     since_hours = float(request.args.get("since_hours", 24))
-    sessions = analyzer.query_sessions(since_seconds=since_hours * 3600, limit=10000)
+    source = request.args.get("source", "all")
+    source = source if source in analyzer.SOURCES else "all"
+    sessions = analyzer.query_sessions(since_seconds=since_hours * 3600, limit=10000, source=source)
     total_in = sum(s.total_input for s in sessions)
     total_cached = sum(s.total_cached for s in sessions)
     total_out = sum(s.total_output for s in sessions)
     total_req = sum(s.n_requests for s in sessions)
     return jsonify({
         "since_hours": since_hours,
+        "source": source,
         "n_sessions": len(sessions),
         "total_requests": total_req,
         "total_input": total_in,
@@ -119,7 +132,7 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
-    print(f"Serving Copilot usage viewer on http://{args.host}:{args.port}")
+    print(f"Serving AI usage viewer on http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=args.debug)
 
 

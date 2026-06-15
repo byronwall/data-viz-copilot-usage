@@ -1,4 +1,4 @@
-// Copilot usage viewer frontend.
+// AI usage viewer frontend.
 // Charts are SVG, rendered client-side from session payloads so filtering is responsive.
 
 const PALETTE = ["#a371f7", "#3fb950", "#ff7b72", "#f0883e", "#79c0ff", "#ffa657", "#d2a8ff", "#56d364"];
@@ -36,6 +36,9 @@ function qtyText(n) { const { num, unit } = qtyParts(n); return num + unit; }
 // in the active unit; fmtCost() wraps it with the unit ($-prefix for USD, " AIC" suffix
 // otherwise); unitLabel() is the standalone symbol for column/section headers.
 let UNIT = "aic"; // "aic" | "usd"
+let SOURCE = "all"; // "all" | "copilot" | "codex"
+let CAL_COST = false;
+let CAL_UNIT = "input tokens";
 function unitLabel() { return UNIT === "usd" ? "$" : "AIC"; }
 function aicConvert(n) { return UNIT === "usd" ? Number(n || 0) / 100 : Number(n || 0); }
 function fmtAic(n) {
@@ -47,6 +50,11 @@ function fmtAic(n) {
   return (v / 1e6).toFixed(2) + "M";
 }
 function fmtCost(n) { return UNIT === "usd" ? "$" + fmtAic(n) : fmtAic(n) + " AIC"; }
+function hasCostMetric() { return SOURCE === "copilot"; }
+function metricFmt(n) { return CAL_COST ? fmtCost(n) : `${qtyText(n)} input`; }
+function metricCell(n) { return CAL_COST ? fmtAicCell(n) : qtyText(n); }
+function calendarButtonLabel() { return CAL_COST ? unitLabel() : "input"; }
+function costColumnLabel() { return hasCostMetric() ? unitLabel() : "cost"; }
 function pad(x) { return String(x).padStart(2, "0"); }
 function hms(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -55,6 +63,32 @@ function hms(ms) {
 }
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
+}
+function wrapSvgText(text, maxChars, maxLines) {
+  const words = String(text || "").trim().split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = "";
+  for (const word of words) {
+    const next = line ? `${line} ${word}` : word;
+    if (next.length <= maxChars) {
+      line = next;
+      continue;
+    }
+    if (line) lines.push(line);
+    if (lines.length >= maxLines) break;
+    if (word.length <= maxChars) {
+      line = word;
+    } else {
+      lines.push(word.slice(0, maxChars - 1) + "…");
+      line = "";
+    }
+    if (lines.length >= maxLines) break;
+  }
+  if (line && lines.length < maxLines) lines.push(line);
+  if (words.join(" ").length > lines.join(" ").length && lines.length) {
+    lines[lines.length - 1] = lines[lines.length - 1].replace(/\s*.{0,1}$/, "") + "…";
+  }
+  return lines.length ? lines : ["(no user msg)"];
 }
 // Render a tool arg/result blob: JSON objects become a dense 2-column key/value
 // table; everything else renders as a verbatim text chunk.
@@ -138,6 +172,11 @@ function reasoningBadge(r) {
   }).join(" ");
 }
 
+function sourceLabelHtml(s) {
+  if (SOURCE !== "all" || !s.source_label) return "";
+  return `<span class="source-pill ${escapeHtml(s.source || "")}">${escapeHtml(s.source_label)}</span>`;
+}
+
 function localMaxT(payload) {
   let mx = 1000;
   for (const c of payload.main || []) if (c.t > mx) mx = c.t;
@@ -146,13 +185,13 @@ function localMaxT(payload) {
 }
 
 function renderChart(payload, opts) {
-  const { w = 360, h = 380, maxTok, big = false, interactive = false } = opts || {};
+  const { w = 360, h = 398, maxTok, big = false, interactive = false } = opts || {};
   const localMax = localMaxT(payload);
   // Layout: top header (mt) → main chart (ih_main) → time labels (timeAxisH) →
   //         sub chart (ih_sub) → footer (mb)
   const ml = big ? 70 : 56, mr = 16;
   const mt = big ? 50 : 44;
-  const mb = big ? 44 : 36;
+  const mb = big ? 58 : 54;
   const subH = big ? 100 : 60;       // height of the per-turn input sub-chart
   const timeAxisH = big ? 22 : 18;   // space for the shared x-axis labels between the two bands
   const iw = w - ml - mr;
@@ -262,9 +301,13 @@ function renderChart(payload, opts) {
   // Kept short so the line fits inside the narrow (360px) grid cards.
   const hdr_uncached = (payload.total_input || 0) - (payload.total_cached || 0);
   let row1 = `<text x="6" y="${big ? 16 : 14}" fill="#c9d1d9" font-size="${fs1}" font-weight="600">${escapeHtml(date)} · <tspan fill="#c9d1d9">${qtySvg(payload.total_input)}</tspan> in · <tspan fill="#f85149">${qtySvg(hdr_uncached)}</tspan> uncached</text>`;
-  // Row 2: output + cache% + AIC (the rest of the totals) followed by turn structure
+  // Row 2: output + cache% + available cost (the rest of the totals) followed by turn structure
   // (reqs, subs, compactions, linkage chips). Overflow from row 1 lands here so it all fits.
-  let row2parts = [`<tspan fill="#c9d1d9">${qtySvg(payload.total_output)}</tspan> out`];
+  let row2parts = [];
+  if (SOURCE === "all" && payload.source_label) {
+    row2parts.push(`<tspan fill="${payload.source === "codex" ? "#56d364" : "#79c0ff"}">${escapeHtml(payload.source_label)}</tspan>`);
+  }
+  row2parts.push(`<tspan fill="#c9d1d9">${qtySvg(payload.total_output)}</tspan> out`);
   row2parts.push(`<tspan fill="${cp >= 70 ? "#58a6ff" : cp >= 30 ? "#d29922" : "#f85149"}">${cp}%</tspan> cache`);
   if (payload.total_aic > 0) row2parts.push(`<tspan fill="#56d364">${fmtCost(payload.total_aic)}</tspan>`);
   row2parts.push(`${nReq} req`);
@@ -359,9 +402,16 @@ function renderChart(payload, opts) {
     }
   });
 
-  // Footer: first user message
-  const title = escapeHtml((payload.first_user || "(no user msg)").slice(0, big ? 110 : 70));
-  svg += `<text x="6" y="${h - 4}" fill="#7d8590" font-size="${big ? 11 : 9}">${title}</text>`;
+  // Footer: first user message, wrapped so long goals remain recognizable in cards.
+  const footerFs = big ? 11 : 9;
+  const footerLineH = big ? 13 : 11;
+  const footerMaxChars = Math.max(16, Math.floor((w - 12) / (footerFs * 0.6)));
+  const titleLines = wrapSvgText(payload.first_user || "(no user msg)", footerMaxChars, 3);
+  svg += `<text x="6" y="${h - mb + 18}" fill="#7d8590" font-size="${footerFs}">`;
+  titleLines.forEach((line, i) => {
+    svg += `<tspan x="6" dy="${i === 0 ? 0 : footerLineH}">${escapeHtml(line)}</tspan>`;
+  });
+  svg += `</text>`;
   svg += "</svg>";
   return svg;
 }
@@ -398,7 +448,7 @@ function renderDetail(payload) {
 
   let html = `
   <div class="modal-header">
-    <div class="modal-meta">${escapeHtml(payload.sid)} · ws ${escapeHtml(payload.workspace || "")} · ${new Date(payload.last_event_ts || payload.mtime * 1000).toLocaleString()} · model ${escapeHtml(payload.top_model)}${payload.reasoning ? ` · reasoning ${reasoningBadge(payload.reasoning)}` : ""}</div>
+    <div class="modal-meta">${escapeHtml(payload.sid)} · ${escapeHtml(payload.source_label || "")} · ws ${escapeHtml(payload.workspace || "")} · ${new Date(payload.last_event_ts || payload.mtime * 1000).toLocaleString()} · model ${escapeHtml(payload.top_model)}${payload.reasoning ? ` · reasoning ${reasoningBadge(payload.reasoning)}` : ""}</div>
     <div class="modal-prompt">${escapeHtml(payload.first_user || "(no user message)")}</div>
     ${linkChip}
     <div class="modal-totals">
@@ -406,7 +456,7 @@ function renderDetail(payload) {
       <span>cached <b style="color:#58a6ff">${qty(total_cached)}</b> (${total_in ? Math.round(100 * total_cached / total_in) : 0}%)</span>
       <span>uncached <b style="color:#f85149">${qty(total_uncached)}</b></span>
       <span>output <b>${qty(total_out)}</b></span>
-      <span>${unitLabel()} <b style="color:#56d364">${fmtAic(total_aic)}</b></span>
+      ${payload.cost_available ? `<span>${unitLabel()} <b style="color:#56d364">${fmtAic(total_aic)}</b></span>` : `<span>cost <b style="color:#444">—</b></span>`}
       <span>turns <b>${all.length}</b></span>
       <span>compactions <b style="color:#ff9a3c">${compactCalls.length}</b> (${fmt(compact_total)} tok)</span>
       <span>duration <b>${hms(payload.duration_ms)}</b></span>
@@ -422,7 +472,7 @@ function renderDetail(payload) {
     <thead><tr>
       <th>#</th><th>t</th><th>debugName</th><th>rsn</th>
       <th class="num">input</th><th class="num">cached</th><th class="num">uncached</th>
-      <th class="num">out</th><th class="num">${unitLabel()}</th><th>tool calls</th>
+      <th class="num">out</th><th class="num">${costColumnLabel()}</th><th>tool calls</th>
     </tr></thead><tbody>`;
 
   // build a kid-meta lookup so we can label search-children with a jump link
@@ -952,7 +1002,7 @@ function buildOverviewPanel(list, ul) {
 
 function renderToolAgg(payload) {
   const { list, totalNew, totalUncached, totalOut, totalAic } = computeToolAgg(payload);
-  const ul = unitLabel();
+  const ul = costColumnLabel();
 
   let h = `<div class="tagg-note"><b>new input</b> = each request's input delta vs. the previous request in the same agent (a shrunk context, e.g. just after a compaction, counts as 0). <b>uncached</b> = input − cached, i.e. the raw prompt size billed each request. Tokens are attributed to every tool a request invoked, so requests calling multiple tools are counted under each — column totals can exceed the session totals below.</div>`;
   h += `<div class="tagg-totals"><span>session new input <b>${qty(totalNew)}</b></span><span>uncached <b style="color:#f85149">${qty(totalUncached)}</b></span><span>output <b>${qty(totalOut)}</b></span><span>${ul} <b style="color:#56d364">${fmtAic(totalAic)}</b></span></div>`;
@@ -1486,7 +1536,7 @@ function buildDemoPayload() {
 // Pins are placed in the chart's own 720×540 coordinate space (the demo svg is rendered
 // at exactly that pixel size), so positions line up with the rendered features.
 const HELP_PINS = [
-  { n: 1, x: 430, y: 13, title: "Cost summary", body: "Date · total input tokens · cache hit % · session cost. Cost shows in AIC credits or $ (toggle in the toolbar)." },
+  { n: 1, x: 430, y: 13, title: "Usage summary", body: "Date · total input tokens · cache hit % · available session cost. Copilot-only cost shows in AIC credits or $." },
   { n: 2, x: 240, y: 32, title: "Turn structure", body: "Request count, <b>sub</b>-agents, <b>🔍</b> search-subagents, and <b>◆</b> compactions for this session." },
   { n: 3, x: 470, y: 150, title: "Foreground line", body: "Cumulative input tokens for the main agent. Steeper = tokens piling up fast (often a large or uncached turn)." },
   { n: 4, x: 297, y: 289, title: "Dot = one request", body: "Dot <b>size</b> ∝ that turn's input; dot <b>color</b> = cache hit rate (blue warm → amber → red cold)." },
@@ -1500,11 +1550,11 @@ const HELP_PINS = [
 const HELP_FEATURES = [
   { name: "Date range", key: "◀ ▶", desc: "Set an explicit start/end, or step the window backward/forward by its current span." },
   { name: "Quick ranges", key: "1h–90d", desc: "Jump to the last N hours/days ending now. Refresh re-anchors a quick range to the current time." },
-  { name: "AIC calendar", key: "📅", desc: "A year heatmap of daily spend. Click a day to filter to it; switches between AIC and $ with the unit toggle." },
+  { name: "Usage calendar", key: "📅", desc: "A year heatmap of daily usage. Click a day to filter to it; Copilot-only mode can switch between AIC and $." },
   { name: "Sort & limit", desc: "Order sessions by input, cost, recency, requests, or duration. Top-N and a min-token floor trim the list." },
   { name: "Charts ↔ Table", desc: "Same sessions as SVG small-multiples or a sortable rollup table. Click a column header to re-sort the table." },
   { name: "Combine sub-agents", desc: "Fold sub-agent tokens into their parent (default), or split each sub-agent out as its own independent row/card." },
-  { name: "AIC ↔ $", desc: "Show cost as Copilot AIC credits or US dollars, at the fixed 100 AIC = $1 rate. Applies everywhere at once." },
+  { name: "AIC ↔ $", desc: "In Copilot-only mode, show cost as AIC credits or US dollars at the fixed 100 AIC = $1 rate." },
   { name: "Detail modal", desc: "Click a card/row to open per-turn detail. Click a chart dot or table row to highlight the matching turn." },
   { name: "Shareable URL", desc: "Every control, the open calendar, the open session, and the detail-view toggles (turns / by tool / by file, tabs, heatmaps) are encoded in the URL — copy it to share the exact view; the toggles also carry over to the next session you open." },
 ];
@@ -1675,7 +1725,7 @@ endEl.addEventListener("change", () => { RANGE_PINNED = false; updateRangeInfo()
 // shared link) restores the exact view. Pinned "last N hours" windows persist as
 // hours=N (re-anchored to now on load); explicit windows persist as start/end
 // unix timestamps. Params at their defaults are omitted to keep URLs clean.
-const URL_DEFAULTS = { hours: 24, sort: "total_input", limit: "50", min_tokens: "0", view: "charts", combine: "1", unit: "aic",
+const URL_DEFAULTS = { hours: 24, sort: "total_input", limit: "50", min_tokens: "0", source: "all", view: "charts", combine: "1", unit: "aic",
   dview: "turns", dtab: "overview", rfview: "table" };
 let SUPPRESS_URL = false; // true while restoring state FROM the URL
 
@@ -1696,6 +1746,7 @@ function syncUrl(push = false) {
   if (limit !== URL_DEFAULTS.limit) p.set("limit", limit);
   const minTok = document.getElementById("min_tokens").value;
   if (minTok !== URL_DEFAULTS.min_tokens) p.set("min_tokens", minTok);
+  if (SOURCE !== URL_DEFAULTS.source) p.set("source", SOURCE);
   if (VIEW !== URL_DEFAULTS.view) p.set("view", VIEW);
   if (!COMBINE) p.set("combine", "0");
   if (UNIT !== URL_DEFAULTS.unit) p.set("unit", UNIT);
@@ -1732,6 +1783,8 @@ function applyUrlState() {
     document.getElementById("sort").value = p.get("sort") || URL_DEFAULTS.sort;
     document.getElementById("limit").value = p.get("limit") || URL_DEFAULTS.limit;
     document.getElementById("min_tokens").value = p.get("min_tokens") || URL_DEFAULTS.min_tokens;
+    SOURCE = ["all", "copilot", "codex"].includes(p.get("source")) ? p.get("source") : URL_DEFAULTS.source;
+    applySourceControls();
     VIEW = p.get("view") === "table" ? "table" : "charts";
     COMBINE = p.get("combine") !== "0";
     UNIT = p.get("unit") === "usd" ? "usd" : "aic";
@@ -1755,8 +1808,8 @@ function applyUrlState() {
 
 window.addEventListener("popstate", applyUrlState);
 
-// ---------- Daily AIC calendar ----------
-// Year heatmap of total AIC per local day, fed by /api/daily_aic (disk-cached server side).
+// ---------- Daily usage calendar ----------
+// Year heatmap of selected daily metric, fed by /api/daily_usage.
 // Wide: one row per month (31 day columns). Narrow: classic 7-day week grids per month.
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 let CAL_DAYS = {};                       // "YYYY-MM-DD" -> aic
@@ -1788,14 +1841,14 @@ function calCell(y, m, d, max, today) {
   const cls = ["cal-cell"];
   if (key === today) cls.push("today");
   if (key === CAL_SELECTED) cls.push("selected");
-  // zero-AIC days are inert: no data-date (click delegation skips), no hover affordance
+  // zero-usage days are inert: no data-date (click delegation skips), no hover affordance
   if (!v) {
     return `<div class="${cls.join(" ")}" style="background:${bg}"><span class="d">${d}</span></div>`;
   }
-  const title = `${MONTH_NAMES[m]} ${d}, ${y} · ${fmtCost(v)}`;
+  const title = `${MONTH_NAMES[m]} ${d}, ${y} · ${metricFmt(v)}`;
   return `<div class="${cls.join(" ")}" data-date="${key}" title="${title}" style="background:${bg}">` +
     `<span class="d">${d}</span>` +
-    `<span class="v" style="color:${fg}">${fmtAicCell(v)}</span>` +
+    `<span class="v" style="color:${fg}">${metricCell(v)}</span>` +
     `</div>`;
 }
 
@@ -1810,7 +1863,7 @@ function renderCalendar() {
     if (v > max) max = v;
   }
   document.getElementById("calYear").textContent = String(y);
-  document.getElementById("calInfo").textContent = yearTotal ? `· ${fmtCost(yearTotal)} this year` : `· no ${unitLabel()} this year`;
+  document.getElementById("calInfo").textContent = yearTotal ? `· ${metricFmt(yearTotal)} this year` : `· no ${CAL_UNIT} this year`;
 
   // month-per-row needs ~26px × 31 cells + label; below that fall back to 7-day weeks
   const wide = el.clientWidth >= 860;
@@ -1842,15 +1895,18 @@ function renderCalendar() {
 
 async function loadCalendar() {
   try {
-    const resp = await fetch("/api/daily_aic");
+    const resp = await fetch(`/api/daily_usage?source=${encodeURIComponent(SOURCE)}`);
     const data = await resp.json();
     CAL_DAYS = data.days || {};
+    CAL_COST = data.cost !== false;
+    CAL_UNIT = data.unit || (CAL_COST ? "AIC" : "input tokens");
+    calTrigger.textContent = `📅 ${calendarButtonLabel()}`;
     // default to the most recent year that has data (usually current year)
     const years = Object.keys(CAL_DAYS).map(k => Number(k.slice(0, 4)));
     if (years.length && !years.includes(CAL_YEAR)) CAL_YEAR = Math.max(...years);
     renderCalendar();
   } catch (e) {
-    document.getElementById("calendar").innerHTML = `<div class="muted" style="padding:8px">failed to load daily AIC</div>`;
+    document.getElementById("calendar").innerHTML = `<div class="muted" style="padding:8px">failed to load daily usage</div>`;
   }
 }
 
@@ -1916,6 +1972,7 @@ async function loadSessions() {
     sort: document.getElementById("sort").value,
     limit: document.getElementById("limit").value,
     min_tokens: document.getElementById("min_tokens").value,
+    source: SOURCE,
   });
   if (s) opts.set("start_ts", String(s));
   if (e) opts.set("end_ts", String(e));
@@ -2053,7 +2110,7 @@ const TABLE_COLS = [
   { key: "reasoning", label: "reasoning", num: false, get: s => s.reasoning || "",
     render: s => reasoningBadge(s.reasoning) },
   { key: "thread", label: "thread (first user message)", num: false, get: s => (s.first_user || "").toLowerCase(),
-    render: s => `<span class="t-thread">${escapeHtml(s.first_user || "(no user message)")}</span>` },
+    render: s => `${sourceLabelHtml(s)}<span class="t-thread">${escapeHtml(s.first_user || "(no user message)")}</span>` },
   { key: "n_requests", label: "req", num: true, get: s => s.n_requests || 0,
     render: s => fmt(s.n_requests) },
   { key: "n_subs", label: "subs", num: true, get: s => s.n_subs || 0,
@@ -2084,7 +2141,7 @@ function renderTable(sessions, maxTok) {
   }
   const thead = TABLE_COLS.map(c => {
     const arrow = TABLE_SORT.key === c.key ? (TABLE_SORT.dir > 0 ? " ▲" : " ▼") : "";
-    const label = c.key === "total_aic" ? unitLabel() : c.label;
+    const label = c.key === "total_aic" ? (hasCostMetric() ? unitLabel() : "cost") : c.label;
     return `<th data-key="${c.key}" class="${c.num ? "num" : ""}">${escapeHtml(label)}${arrow}</th>`;
   }).join("");
   const body = rows.map(s => {
@@ -2112,19 +2169,32 @@ function updateBanner() {
   const tot_cached = ss.reduce((s, x) => s + x.total_cached, 0);
   const tot_req = ss.reduce((s, x) => s + x.n_requests, 0);
   const tot_aic = ss.reduce((s, x) => s + (x.total_aic || 0), 0);
+  const costPart = ss.some(x => x.cost_available) ? ` · ${SOURCE === "all" ? "Copilot " : ""}${fmtCost(tot_aic)}` : "";
   document.getElementById("banner-stats").textContent =
-    `· ${ss.length} sessions · ${fmt(tot_req)} reqs · ${qtyText(tot_in)} input · ${tot_in ? Math.round(100 * tot_cached / tot_in) : 0}% cached · ${fmtCost(tot_aic)} · shared y-max ${qtyText(LAST_MAXTOK)}`;
+    `· ${ss.length} sessions · ${fmt(tot_req)} reqs · ${qtyText(tot_in)} input · ${tot_in ? Math.round(100 * tot_cached / tot_in) : 0}% cached${costPart} · shared y-max ${qtyText(LAST_MAXTOK)}`;
 }
 
 // Re-express every cost figure on screen in the active unit (AIC or $).
 function applyUnit() {
   document.querySelectorAll(".unit-btn").forEach(b => b.classList.toggle("active", b.dataset.unit === UNIT));
   const calBtn = document.getElementById("calTrigger");
-  if (calBtn) calBtn.textContent = `📅 ${unitLabel()}`;
+  if (calBtn) calBtn.textContent = `📅 ${calendarButtonLabel()}`;
   updateBanner();
   if (LAST_SESSIONS.length) applyView();
   if (!calPop.hidden) renderCalendar();
   if (MODAL_SID) openModal(MODAL_SID);
+}
+
+function applySourceControls() {
+  CAL_COST = hasCostMetric();
+  CAL_UNIT = CAL_COST ? "AIC" : "input tokens";
+  document.querySelectorAll(".source-btn").forEach(b => b.classList.toggle("active", b.dataset.source === SOURCE));
+  const unitToggle = document.getElementById("unitToggle");
+  if (unitToggle) unitToggle.hidden = !hasCostMetric();
+  const aicSort = document.querySelector('#sort option[value="aic"]');
+  if (aicSort) aicSort.textContent = hasCostMetric() ? "by AIC" : "by usage metric";
+  const calBtn = document.getElementById("calTrigger");
+  if (calBtn) calBtn.textContent = `📅 ${calendarButtonLabel()}`;
 }
 
 function applyView() {
@@ -2132,7 +2202,7 @@ function applyView() {
   document.querySelectorAll(".view-btn").forEach(b => b.classList.toggle("active", (b.dataset.view === "table") !== charts));
   document.querySelectorAll(".combine-btn").forEach(b => b.classList.toggle("active", (b.dataset.combine === "1") === COMBINE));
   document.querySelectorAll(".unit-btn").forEach(b => b.classList.toggle("active", b.dataset.unit === UNIT));
-  document.getElementById("calTrigger").textContent = `📅 ${unitLabel()}`;
+  applySourceControls();
   document.getElementById("grid").hidden = !charts;
   document.getElementById("tableWrap").hidden = charts;
   if (!LAST_SESSIONS.length) return;
@@ -2157,6 +2227,19 @@ document.querySelectorAll(".combine-btn").forEach(b => {
     COMBINE = v;
     syncUrl();
     applyView();
+  });
+});
+
+document.querySelectorAll(".source-btn").forEach(b => {
+  b.addEventListener("click", () => {
+    if (SOURCE === b.dataset.source) return;
+    SOURCE = b.dataset.source;
+    CAL_DAYS = {};
+    _calLoaded = false;
+    applySourceControls();
+    syncUrl();
+    loadSessions();
+    if (!calPop.hidden) loadCalendar();
   });
 });
 
