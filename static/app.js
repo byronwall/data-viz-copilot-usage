@@ -416,16 +416,50 @@ function renderChart(payload, opts) {
   return svg;
 }
 
+// ---------- Tool-call failure detection ----------
+// A tool's logged status (t.s) is almost always "ok" even when the operation failed, so
+// failures are detected from well-known result-text markers instead. Returns a short
+// human-readable reason when a call looks failed, or "" when it looks successful. The
+// markers below were derived from a sweep of real session logs — they cover apply_patch,
+// read_file, create_file, run_in_terminal, runSubagent/search_subagent and MCP tools, and
+// are anchored to the START of the result so file contents / test summaries that merely
+// mention "error" don't get flagged.
+function firstLine(s) { return oneLine(String(s ?? "").split("\n")[0]); }
+function toolFailReason(t) {
+  if (!t) return "";
+  const st = String(t.s ?? "").toLowerCase();
+  const statusBad = st && st !== "ok" && st !== "success" && st !== "?";
+  const s = String(t.res ?? "").replace(/^\s+/, "");
+  if (!s) return statusBad ? st : "";
+  const sl = s.toLowerCase();
+  // apply_patch self-correction recovered and applied — that's a SUCCESS, not a failure.
+  if (sl.startsWith("there was an error applying your original patch")) return "";
+  if (sl.startsWith("applying patch failed with error")) return firstLine(s);
+  if (sl.startsWith("agent error:")) return firstLine(s);
+  if (sl.startsWith("error:")) return firstLine(s);                 // VS Code generic tool error (read_file, create_file, runSubagent, "ERROR: Canceled", terminal command errors)
+  if (sl.startsWith("failed to retrieve command output")) return "failed to retrieve command output";
+  if (s.startsWith("### Error")) {                                  // MCP tools render "### Error\n<message>"
+    const msg = s.split("\n").map(x => x.trim()).filter(Boolean)[1];
+    return oneLine(msg || "error");
+  }
+  return statusBad ? st : "";
+}
+function toolFailed(t) { return !!toolFailReason(t); }
+
 // One tool call's collapsible block: a one-line head (name + arg gist + duration +
 // copy) that expands to the full args (and result, if any). Shared by the per-turn
 // table and the by-tool aggregate view so both render tool params identically.
+// Failed calls get an orange ⚠ at the far left, an orange-tinted block, and the failure
+// reason in place of the arg gist so the cause reads without expanding.
 function toolBlockHtml(t) {
   const dur = t.d > 0 ? `<span class="dur">${t.d}ms</span>` : "";
-  const summary = summarizeArgs(t.a || "");
+  const fail = toolFailReason(t);
+  const summary = fail || summarizeArgs(t.a || "");
   let detail = renderValue(t.a || "");
   if (t.res) detail += `<div class="res"><span class="reslbl">result</span><div class="res-body clamped">${renderValue(t.res)}</div><button class="res-toggle" type="button">show more</button></div>`;
   const copyAttr = encodeURIComponent(String(t.a ?? "") + (t.res ? `\n\n--- result ---\n${t.res}` : ""));
-  return `<div class="tool"><div class="tool-head"><span class="caret">▸</span><span class="nm">${escapeHtml(t.n)}</span><button class="copy-btn" type="button" data-copy="${copyAttr}" title="Copy full message to clipboard">copy</button>${dur}<span class="summary">${escapeHtml(summary)}</span></div><div class="tool-detail collapsed">${detail}</div></div>`;
+  const failIcon = fail ? `<span class="fail-icon" title="tool call failed: ${escapeHtml(fail)}">⚠</span>` : "";
+  return `<div class="tool${fail ? " tool-failed" : ""}"><div class="tool-head">${failIcon}<span class="caret">▸</span><span class="nm">${escapeHtml(t.n)}</span><button class="copy-btn" type="button" data-copy="${copyAttr}" title="Copy full message to clipboard">copy</button>${dur}<span class="summary">${escapeHtml(summary)}</span></div><div class="tool-detail collapsed">${detail}</div></div>`;
 }
 
 function renderDetail(payload) {
@@ -437,6 +471,8 @@ function renderDetail(payload) {
   const compactCalls = all.filter(c => c.compact);
   const compact_total = compactCalls.reduce((s, c) => s + c.input, 0);
   const total_aic = payload.total_aic != null ? payload.total_aic : all.reduce((s, c) => s + (c.aic || 0), 0);
+  let nToolCalls = 0, nToolFails = 0;
+  all.forEach(c => (c.tools || []).forEach(t => { if (t.n !== "user_message") { nToolCalls++; if (toolFailed(t)) nToolFails++; } }));
 
   // No chips — search-children are rendered inline as sub-agent sections in the table.
   // For orphan find-sessions (those visible standalone because no parent was matched), show a
@@ -459,6 +495,7 @@ function renderDetail(payload) {
       ${payload.cost_available ? `<span>${unitLabel()} <b style="color:#56d364">${fmtAic(total_aic)}</b></span>` : `<span>cost <b style="color:#444">—</b></span>`}
       <span>turns <b>${all.length}</b></span>
       <span>compactions <b style="color:#ff9a3c">${compactCalls.length}</b> (${fmt(compact_total)} tok)</span>
+      <span>tool fails <b style="color:${nToolFails ? "#ff9a3c" : "#444"}">${nToolFails}</b>${nToolCalls ? ` / ${fmt(nToolCalls)} (${Math.round(100 * nToolFails / nToolCalls)}%)` : ""}</span>
       <span>duration <b>${hms(payload.duration_ms)}</b></span>
     </div>
     <div class="dview-controls">
@@ -507,10 +544,16 @@ function renderDetail(payload) {
     const compactClass = c.compact ? "compact-row" : "";
     const tools = c.tools || [];
     const hasTools = tools.length > 0;
+    const nFail = tools.filter(toolFailed).length;
+    const failBadge = nFail ? ` <span class="toolfail-badge" title="${nFail} failed tool call${nFail > 1 ? "s" : ""}">⚠ ${nFail}</span>` : "";
     const toolSummary = tools.length === 0
       ? `<span style="color:#444">—</span>`
-      : tools.slice(0, 3).map(t => `<span style="color:#79c0ff">${escapeHtml(t.n)}</span>`).join(" ")
-        + (tools.length > 3 ? ` <span style="color:#666">+${tools.length - 3}</span>` : "");
+      : tools.slice(0, 3).map(t => {
+          const f = toolFailed(t);
+          return `<span style="color:${f ? "#ff9a3c" : "#79c0ff"}"${f ? ` title="failed"` : ""}>${f ? "⚠" : ""}${escapeHtml(t.n)}</span>`;
+        }).join(" ")
+        + (tools.length > 3 ? ` <span style="color:#666">+${tools.length - 3}</span>` : "")
+        + failBadge;
     html += `<tr class="call ${compactClass}${hasTools ? " expandable" : ""}" data-idx="${idx}">
       <td>${hasTools ? `<span class="caret">▸</span>` : ""}${c.idx + 1}</td>
       <td>${hms(c.t)}</td>
@@ -557,7 +600,7 @@ function computeToolAgg(payload) {
   const buckets = new Map(); // tool name -> bucket
   function bucketFor(name) {
     let b = buckets.get(name);
-    if (!b) { b = { name, callers: new Map(), sumNew: 0, sumUncached: 0, sumOut: 0, sumAic: 0, uses: 0 }; buckets.set(name, b); }
+    if (!b) { b = { name, callers: new Map(), sumNew: 0, sumUncached: 0, sumOut: 0, sumAic: 0, uses: 0, fails: 0 }; buckets.set(name, b); }
     return b;
   }
 
@@ -587,13 +630,13 @@ function computeToolAgg(payload) {
         const b = bucketFor(nm);
         let caller = b.callers.get(callKey);
         if (!caller) {
-          caller = { ...meta, instances: [] };
+          caller = { ...meta, instances: [], fails: 0 };
           b.callers.set(callKey, caller);
           b.sumNew += meta.newInput; b.sumUncached += meta.uncached; b.sumOut += meta.out; b.sumAic += meta.aic;
         }
         if (nm === NO_TOOL) { b.uses += 1; return; }
         const insts = tools.filter(t => (t.n || "?") === nm);
-        insts.forEach(t => { caller.instances.push(t); b.uses += 1; });
+        insts.forEach(t => { caller.instances.push(t); b.uses += 1; if (toolFailed(t)) { b.fails += 1; caller.fails += 1; } });
       });
     });
   });
@@ -602,12 +645,14 @@ function computeToolAgg(payload) {
     name: b.name,
     nCallers: b.callers.size,
     uses: b.uses,
+    fails: b.fails,
     sumNew: b.sumNew, sumUncached: b.sumUncached, sumOut: b.sumOut, sumAic: b.sumAic,
     callers: [...b.callers.values()].sort((a, z) => z.aic - a.aic),
   })).sort((a, z) => z.sumAic - a.sumAic);
 
   const totalAic = payload.total_aic != null ? payload.total_aic : list.reduce((s, b) => s + b.sumAic, 0);
-  return { list, totalNew, totalUncached, totalOut: payload.total_output || 0, totalAic };
+  const totalFails = list.reduce((s, b) => s + b.fails, 0);
+  return { list, totalNew, totalUncached, totalOut: payload.total_output || 0, totalAic, totalFails };
 }
 
 // Pull a file path out of a tool's args JSON, trying the keys various tools use.
@@ -816,12 +861,13 @@ function buildFilePanel(bucket, ul) {
     const resLen = inst && inst.res ? inst.res.length : 0;
     const dur = inst ? (inst.d || 0) : 0;
     const exp = inst ? " expandable" : "";
+    const fail = inst ? toolFailReason(inst) : "";
     const id = ident.get(e.grp);
     const srcKey = (id ? id.short : e.grp || "") + " " + (e.dbg || "");
-    h += `<tr class="srow${exp}" data-ord="${ord}" data-t="${e.t || 0}" data-file="${escapeHtml(rel.toLowerCase())}" data-path="${escapeHtml((paths[ei] || rel).toLowerCase())}" data-reads="${cnt || 0}" data-range="${escapeHtml(range.toLowerCase())}" data-res="${resLen}" data-dur="${dur}" data-src="${escapeHtml(srcKey.toLowerCase())}" data-aic="${e.aic || 0}">
+    h += `<tr class="srow${exp}${fail ? " srow-failed" : ""}" data-ord="${ord}" data-t="${e.t || 0}" data-file="${escapeHtml(rel.toLowerCase())}" data-path="${escapeHtml((paths[ei] || rel).toLowerCase())}" data-reads="${cnt || 0}" data-range="${escapeHtml(range.toLowerCase())}" data-res="${resLen}" data-dur="${dur}" data-src="${escapeHtml(srcKey.toLowerCase())}" data-aic="${e.aic || 0}">
       <td class="num">${ord + 1}</td>
       <td>${hms(e.t || 0)}</td>
-      <td>${inst ? `<span class="caret">▸</span>` : ""}<span class="fpath${ext ? " ext" : ""}" title="${escapeHtml(paths[ei] || "")}">${ext ? "↗ " : ""}${escapeHtml(rel)}</span></td>
+      <td>${inst ? `<span class="caret">▸</span>` : ""}${fail ? `<span class="fail-icon" title="failed: ${escapeHtml(fail)}">⚠</span> ` : ""}<span class="fpath${ext ? " ext" : ""}" title="${escapeHtml(paths[ei] || "")}">${ext ? "↗ " : ""}${escapeHtml(rel)}</span></td>
       <td class="num">${cnt > 1 ? `<span class="rcount">×${cnt}${readsPopover(rels[ei], fileCalls[rels[ei]])}</span>` : (cnt || "")}</td>
       <td class="frange">${escapeHtml(range)}</td>
       <td class="num">${resLen ? qtyText(resLen) + "c" : "<span style='color:#444'>—</span>"}</td>
@@ -938,7 +984,8 @@ function buildGenericPanel(bucket, ul) {
   </tr></thead><tbody>`;
   order.forEach((ei, ord) => {
     const e = events[ei], inst = e.inst;
-    const gist = inst ? (summarizeArgs(inst.a || "") || "—") : "(request)";
+    const fail = inst ? toolFailReason(inst) : "";
+    const gist = inst ? (fail || summarizeArgs(inst.a || "") || "—") : "(request)";
     const resLen = inst && inst.res ? inst.res.length : 0;
     const dur = inst ? (inst.d || 0) : 0;
     const exp = inst ? " expandable" : "";
@@ -947,10 +994,10 @@ function buildGenericPanel(bucket, ul) {
     // for the global path filter: any file paths in the args, falling back to the gist
     // text so path-bearing args of non-file tools (grep patterns, commands) still match.
     const pathKey = (inst ? toolFilePaths(inst.a).join(" ") : "") || gist;
-    h += `<tr class="srow${exp}" data-ord="${ord}" data-t="${e.t || 0}" data-path="${escapeHtml(pathKey.toLowerCase())}" data-gist="${escapeHtml(gist.toLowerCase())}" data-res="${resLen}" data-dur="${dur}" data-src="${escapeHtml(srcKey.toLowerCase())}" data-aic="${e.aic || 0}">
+    h += `<tr class="srow${exp}${fail ? " srow-failed" : ""}" data-ord="${ord}" data-t="${e.t || 0}" data-path="${escapeHtml(pathKey.toLowerCase())}" data-gist="${escapeHtml(gist.toLowerCase())}" data-res="${resLen}" data-dur="${dur}" data-src="${escapeHtml(srcKey.toLowerCase())}" data-aic="${e.aic || 0}">
       <td class="num">${ord + 1}</td>
       <td>${hms(e.t || 0)}</td>
-      <td>${inst ? `<span class="caret">▸</span>` : ""}<span class="fpath">${escapeHtml(gist)}</span></td>
+      <td>${inst ? `<span class="caret">▸</span>` : ""}${fail ? `<span class="fail-icon" title="tool call failed">⚠</span> ` : ""}<span class="fpath">${escapeHtml(gist)}</span></td>
       <td class="num">${resLen ? qtyText(resLen) + "c" : "<span style='color:#444'>—</span>"}</td>
       <td class="num">${dur ? dur + "ms" : ""}</td>
       <td class="dbg">${agentBadgeHtml(id, e.grp)}${e.dbg ? ` <span class="dbgn">${escapeHtml(e.dbg)}</span>` : ""}</td>
@@ -965,29 +1012,35 @@ function buildGenericPanel(bucket, ul) {
 // The overview rollup table (every tool, one row each, drill into callers → params).
 function buildOverviewPanel(list, ul) {
   let h = `<table class="tagg"><thead><tr>
-    <th>tool</th><th class="num">calls</th><th class="num">uses</th>
+    <th>tool</th><th class="num">calls</th><th class="num">uses</th><th class="num">failed</th>
     <th class="num">new input</th><th class="num">uncached</th><th class="num">output</th><th class="num">${ul}</th>
   </tr></thead><tbody>`;
-  if (!list.length) h += `<tr><td colspan="7" class="muted" style="padding:12px">no calls</td></tr>`;
+  if (!list.length) h += `<tr><td colspan="8" class="muted" style="padding:12px">no calls</td></tr>`;
   list.forEach((b, bi) => {
-    h += `<tr class="tagg-tool expandable" data-k="t${bi}">
-      <td><span class="caret">▸</span><span class="tnm">${escapeHtml(b.name)}</span></td>
+    const failBadge = b.fails ? `<span class="toolfail-badge" title="${b.fails} of ${b.uses} call${b.uses > 1 ? "s" : ""} failed">⚠ ${b.fails}</span>` : "";
+    const failCell = b.fails
+      ? `<span class="failnum" title="${Math.round(100 * b.fails / b.uses)}% of ${b.uses} failed">${b.fails}</span>`
+      : `<span style="color:#444">0</span>`;
+    h += `<tr class="tagg-tool expandable${b.fails ? " has-fails" : ""}" data-k="t${bi}">
+      <td><span class="caret">▸</span><span class="tnm">${escapeHtml(b.name)}</span>${failBadge}</td>
       <td class="num">${b.nCallers}</td>
       <td class="num">${b.uses}</td>
+      <td class="num">${failCell}</td>
       <td class="num">${fmt(b.sumNew)}</td>
       <td class="num uncached">${fmt(b.sumUncached)}</td>
       <td class="num">${fmt(b.sumOut)}</td>
       <td class="num aic">${b.sumAic ? fmtAic(b.sumAic) : "<span style='color:#444'>—</span>"}</td>
     </tr>`;
-    h += `<tr class="tagg-sub collapsed"><td colspan="7"><div class="tagg-sub-inner"><table class="tagg-callers"><thead><tr>
+    h += `<tr class="tagg-sub collapsed"><td colspan="8"><div class="tagg-sub-inner"><table class="tagg-callers"><thead><tr>
       <th>t</th><th>source</th><th class="num">new input</th><th class="num">uncached</th><th class="num">output</th><th class="num">${ul}</th><th class="num">uses</th>
     </tr></thead><tbody>`;
     b.callers.forEach((c, ci) => {
       const hasParams = c.instances.length > 0;
       const dbgClass = c.compact ? "dbg compact" : "dbg";
+      const toolFailMark = c.fails ? ` <span style="color:#ff9a3c" title="${c.fails} failed tool call${c.fails > 1 ? "s" : ""}">⚠${c.fails > 1 ? c.fails : ""}</span>` : "";
       h += `<tr class="tagg-caller${hasParams ? " expandable" : ""}" data-k="t${bi}-c${ci}">
         <td>${hasParams ? `<span class="caret">▸</span>` : ""}${hms(c.t)}</td>
-        <td class="${dbgClass}">${escapeHtml(c.dbg || "")}${c.err ? ` <span style="color:#f85149" title="${escapeHtml(c.errMsg || "request failed")}">✕</span>` : ""} <span class="grp">${escapeHtml(c.grp)}</span></td>
+        <td class="${dbgClass}">${escapeHtml(c.dbg || "")}${c.err ? ` <span style="color:#f85149" title="${escapeHtml(c.errMsg || "request failed")}">✕</span>` : ""}${toolFailMark} <span class="grp">${escapeHtml(c.grp)}</span></td>
         <td class="num">${fmt(c.newInput)}</td>
         <td class="num uncached">${fmt(c.uncached)}</td>
         <td class="num">${fmt(c.out)}</td>
@@ -1007,15 +1060,16 @@ function buildOverviewPanel(list, ul) {
 }
 
 function renderToolAgg(payload) {
-  const { list, totalNew, totalUncached, totalOut, totalAic } = computeToolAgg(payload);
+  const { list, totalNew, totalUncached, totalOut, totalAic, totalFails } = computeToolAgg(payload);
   const ul = costColumnLabel();
+  const totalUses = list.reduce((s, b) => s + b.uses, 0);
 
   let h = `<div class="tagg-note"><b>new input</b> = each request's input delta vs. the previous request in the same agent (a shrunk context, e.g. just after a compaction, counts as 0). <b>uncached</b> = input − cached, i.e. the raw prompt size billed each request. Tokens are attributed to every tool a request invoked, so requests calling multiple tools are counted under each — column totals can exceed the session totals below.</div>`;
-  h += `<div class="tagg-totals"><span>session new input <b>${qty(totalNew)}</b></span><span>uncached <b style="color:#f85149">${qty(totalUncached)}</b></span><span>output <b>${qty(totalOut)}</b></span><span>${ul} <b style="color:#56d364">${fmtAic(totalAic)}</b></span></div>`;
+  h += `<div class="tagg-totals"><span>session new input <b>${qty(totalNew)}</b></span><span>uncached <b style="color:#f85149">${qty(totalUncached)}</b></span><span>output <b>${qty(totalOut)}</b></span><span>${ul} <b style="color:#56d364">${fmtAic(totalAic)}</b></span><span>failed <b style="color:${totalFails ? "#ff9a3c" : "#444"}">${totalFails}</b>${totalUses ? ` / ${fmt(totalUses)} (${Math.round(100 * totalFails / totalUses)}%)` : ""}</span></div>`;
 
   // Segmented tabs: overview + one per tool, drilling into a dedicated per-tool view.
   let tabs = `<div class="tagg-tabs"><button type="button" class="tagg-tab active" data-tab="overview" data-name="overview">overview</button>`;
-  list.forEach((b, bi) => { tabs += `<button type="button" class="tagg-tab" data-tab="t${bi}" data-name="${escapeHtml(b.name)}">${escapeHtml(b.name)} <span class="tcount">${b.uses}</span></button>`; });
+  list.forEach((b, bi) => { tabs += `<button type="button" class="tagg-tab${b.fails ? " has-fails" : ""}" data-tab="t${bi}" data-name="${escapeHtml(b.name)}">${escapeHtml(b.name)} <span class="tcount">${b.uses}</span>${b.fails ? `<span class="tcount tcount-fail" title="${b.fails} failed">⚠${b.fails}</span>` : ""}</button>`; });
   tabs += `</div>`;
 
   let panels = `<div class="tagg-panel" data-tab="overview">${buildOverviewPanel(list, ul)}</div>`;
@@ -1071,10 +1125,11 @@ function collectFileEvents(payload) {
   groups.forEach(g => g.calls.forEach(c => (c.tools || []).forEach(t => {
     const paths = toolFilePaths(t.a);
     if (!paths.length) { skipped++; return; }
+    const fail = toolFailReason(t);
     paths.forEach(path => events.push({
       path, tool: t.n || "?", t: t.t != null ? t.t : c.t, grp: g.grp, dbg: c.dbg,
       span: parseRange(t.a), range: fileRange(t.a),
-      resLen: t.res ? t.res.length : 0, dur: t.d || 0, inst: t,
+      resLen: t.res ? t.res.length : 0, dur: t.d || 0, inst: t, fail,
     }));
   })));
   return { events, skipped };
@@ -1125,9 +1180,10 @@ function buildFileAggTable(files, toolCol, ident) {
     const regions = maxLine
       ? `<span class="mini-heat" title="${spans.length} ranged action${spans.length > 1 ? "s" : ""} over ~${fmt(maxLine)} lines">${lineHeatStrip(spans, maxLine).svg}<span class="mini-heat-max">${fmt(maxLine)}</span></span>`
       : `<span style="color:#444">—</span>`;
-    h += `<tr class="srow expandable" data-ord="${fi}" data-file="${escapeHtml(f.rel.toLowerCase())}" data-path="${escapeHtml((f.path || f.rel).toLowerCase())}" data-n="${f.events.length}" data-tools="${escapeHtml(toolKey.toLowerCase())}" data-lines="${maxLine}" data-res="${f.res}" data-dur="${f.dur}" data-src="${escapeHtml([...f.agents].join(" ").toLowerCase())}">
+    const fileFailBadge = f.fails ? ` <span class="toolfail-badge" title="${f.fails} failed action${f.fails > 1 ? "s" : ""} on this file">⚠ ${f.fails}</span>` : "";
+    h += `<tr class="srow expandable${f.fails ? " srow-failed" : ""}" data-ord="${fi}" data-file="${escapeHtml(f.rel.toLowerCase())}" data-path="${escapeHtml((f.path || f.rel).toLowerCase())}" data-n="${f.events.length}" data-tools="${escapeHtml(toolKey.toLowerCase())}" data-lines="${maxLine}" data-res="${f.res}" data-dur="${f.dur}" data-src="${escapeHtml([...f.agents].join(" ").toLowerCase())}">
       <td class="num">${fi + 1}</td>
-      <td><span class="caret">▸</span><span class="fpath${f.ext ? " ext" : ""}" title="${escapeHtml(f.path)}">${f.ext ? "↗ " : ""}${escapeHtml(f.rel)}</span></td>
+      <td><span class="caret">▸</span><span class="fpath${f.ext ? " ext" : ""}" title="${escapeHtml(f.path)}">${f.ext ? "↗ " : ""}${escapeHtml(f.rel)}</span>${fileFailBadge}</td>
       <td class="num">${f.events.length}</td>
       <td class="fchips">${chips}</td>
       <td class="fregions">${regions}</td>
@@ -1138,7 +1194,7 @@ function buildFileAggTable(files, toolCol, ident) {
     let inner = "";
     f.events.forEach(e => {
       const id = ident.get(e.grp);
-      inner += `<div class="fagg-evt"><span class="fagg-t">${hms(e.t)}</span>${toolChipHtml(e.tool, null, toolCol.get(e.tool))}${e.range ? `<span class="frange">${escapeHtml(e.range)}</span>` : ""}${agentBadgeHtml(id, e.grp)}</div>${toolBlockHtml(e.inst)}`;
+      inner += `<div class="fagg-evt${e.fail ? " evt-failed" : ""}"><span class="fagg-t">${hms(e.t)}</span>${e.fail ? `<span class="fail-icon" title="tool call failed">⚠</span>` : ""}${toolChipHtml(e.tool, null, toolCol.get(e.tool))}${e.range ? `<span class="frange">${escapeHtml(e.range)}</span>` : ""}${agentBadgeHtml(id, e.grp)}</div>${toolBlockHtml(e.inst)}`;
     });
     h += `<tr class="srow-detail collapsed"><td colspan="8"><div class="tools-inner">${inner}</div></td></tr>`;
   });
@@ -1157,8 +1213,8 @@ function renderFileAgg(payload) {
   const fileMap = new Map();
   events.forEach(e => {
     let f = fileMap.get(e.rel);
-    if (!f) { f = { rel: e.rel, path: e.path, ext: e.ext, events: [], byTool: new Map(), agents: new Set(), res: 0, dur: 0 }; fileMap.set(e.rel, f); }
-    f.events.push(e); f.agents.add(e.grp); f.res += e.resLen; f.dur += e.dur;
+    if (!f) { f = { rel: e.rel, path: e.path, ext: e.ext, events: [], byTool: new Map(), agents: new Set(), res: 0, dur: 0, fails: 0 }; fileMap.set(e.rel, f); }
+    f.events.push(e); f.agents.add(e.grp); f.res += e.resLen; f.dur += e.dur; if (e.fail) f.fails++;
     if (!f.byTool.has(e.tool)) f.byTool.set(e.tool, []);
     f.byTool.get(e.tool).push(e);
   });
@@ -1533,6 +1589,7 @@ function buildDemoPayload() {
               _demoTool("readFile", '{"filePath":"src/server.ts"}', "import express from 'express'\nconst app = express()\n// ...route registration", 11)] },
     { t: 42000, input: 7600, cached: 1800, output: 610, dbg: "panel/editAgent", reasoning: "medium", aic: 1.8,
       tools: [_demoTool("readFile", '{"filePath":"src/routes/api.ts"}', "router.get('/users', listUsers)\nrouter.post('/users', createUser)", 9),
+              _demoTool("apply_patch", '{"filePath":"src/middleware/auth.ts"}', "Applying patch failed with error: Invalid context at character 0: the patch did not match the file contents", 6),
               _demoTool("editFile", '{"filePath":"src/middleware/auth.ts"}', "+ export function requireAuth(req, res, next) { ... }", 34)] },
     { t: 118000, input: 16800, cached: 9200, output: 880, dbg: "panel/editAgent", reasoning: "high", aic: 4.2,
       tools: [_demoTool("runInTerminal", '{"command":"npm test"}', "Tests:  3 passed, 2 failed\n  ✕ rejects expired tokens", 2400)] },
@@ -1609,6 +1666,7 @@ const HELP_COLORS = [
   { mark: `<span class="hc-swatch" style="background:#58a6ff"></span>`, txt: "<b>Foreground</b> agent (panel/editAgent) — solid line" },
   { mark: `<span class="hc-line" style="border-color:#a371f7"></span>`, txt: "<b>Sub-agent</b> — dashed, one color each" },
   { mark: `<span class="hc-line" style="border-color:#79c0ff;border-top-style:dashed"></span>`, txt: "<b>🔍 search-subagent</b> — dashed blue + spawn ring" },
+  { mark: `<span class="fail-icon">⚠</span>`, txt: "<b>Failed tool call</b> — the operation errored (e.g. a patch that didn't apply); orange-tinted, with a ⚠ and a per-tool fail count in the by-tool/by-file rollups" },
   { mark: `<span class="hc-dia"></span>`, txt: "<b>Compaction</b> — context was summarized" },
   { mark: `<span class="hc-swatch" style="background:#58a6ff"></span>`, txt: "<b>Warm cache</b> — &gt;70% of input was cached" },
   { mark: `<span class="hc-swatch" style="background:#d29922"></span>`, txt: "<b>Medium cache</b> — 30–70% cached" },

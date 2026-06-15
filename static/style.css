@@ -433,3 +433,32 @@ table.tagg-files col.c-regions { width: 150px; }
 .help-color .hc-line { width: 18px; height: 0; border-top-width: 2px; border-top-style: solid; }
 .help-color .hc-txt { color: var(--mute); }
 .help-color .hc-txt b { color: var(--fg); }
+
+/* ---------- Failed tool calls ---------- */
+/* A tool's logged status is unreliable, so failures are detected from result-text
+   markers (see toolFailReason in app.js) and flagged in orange wherever tool calls are
+   listed or aggregated, with a ⚠ icon at the far left. */
+.fail-icon { color: var(--orange); flex: none; font-weight: 700; }
+/* per-tool block (turns table, by-tool params, by-file actions) */
+.tools-inner .tool.tool-failed { border-left: 2px solid var(--orange); padding-left: 7px;
+  margin-left: -9px; background: rgba(255, 154, 60, 0.06); border-radius: 0 3px 3px 0; }
+.tools-inner .tool.tool-failed .nm { color: var(--orange); }
+.tools-inner .tool.tool-failed .summary { color: #ffb784; }
+.tools-inner .tool.tool-failed .tool-head .caret { color: var(--orange); }
+/* inline count badge (turns "tool calls" column, by-tool overview row, by-file row) */
+.toolfail-badge { color: var(--orange); background: rgba(255, 154, 60, 0.12);
+  border: 1px solid rgba(255, 154, 60, 0.4); border-radius: 4px; padding: 0 4px;
+  font-size: 9px; font-weight: 600; white-space: nowrap; }
+/* by-tool overview "failed" column */
+.failnum { color: var(--orange); font-weight: 600; }
+tr.tagg-tool.has-fails .tnm { color: var(--orange); }
+/* by-tool tab pill fail count */
+.tagg-tab .tcount.tcount-fail { background: rgba(255, 154, 60, 0.18); color: var(--orange);
+  margin-left: 3px; }
+.tagg-tab.active .tcount.tcount-fail { background: rgba(255, 255, 255, 0.22); color: #fff; }
+.tagg-tab.has-fails:not(.active) { border-color: rgba(255, 154, 60, 0.45); }
+/* failed rows in the by-tool/by-file sortable tables */
+tr.srow.srow-failed > td { background: rgba(255, 154, 60, 0.05); }
+tr.srow.srow-failed > td:first-child { box-shadow: inset 3px 0 0 var(--orange); }
+/* failed action line in the by-file expanded list */
+.fagg-evt.evt-failed { color: var(--orange); }
