@@ -461,10 +461,13 @@ function renderDetail(payload) {
       <span>compactions <b style="color:#ff9a3c">${compactCalls.length}</b> (${fmt(compact_total)} tok)</span>
       <span>duration <b>${hms(payload.duration_ms)}</b></span>
     </div>
-    <div class="view-toggle dview-toggle">
-      <button type="button" class="dview-btn active" data-dview="turns">turns</button>
-      <button type="button" class="dview-btn" data-dview="tools">by tool</button>
-      <button type="button" class="dview-btn" data-dview="files">by file</button>
+    <div class="dview-controls">
+      <div class="view-toggle dview-toggle">
+        <button type="button" class="dview-btn active" data-dview="turns">turns</button>
+        <button type="button" class="dview-btn" data-dview="tools">by tool</button>
+        <button type="button" class="dview-btn" data-dview="files">by file</button>
+      </div>
+      <span class="dfilter-wrap"><input type="search" id="dviewFilter" class="dfilter" placeholder="filter file path… e.g. /docs" value="${escapeHtml(DFILTER)}" spellcheck="false" autocomplete="off"><span class="dfilter-count" id="dfilterCount"></span></span>
     </div>
   </div>
   <div class="dview" data-dview="turns">
@@ -784,7 +787,7 @@ function buildFilePanel(bucket, ul) {
   const outside = paths.filter(p => p && !underRoot(root, p)).length;
   const order = events.map((_, i) => i).sort((a, z) => (events[a].t || 0) - (events[z].t || 0));
   // per-read records (carry the agent) for the line heatmap, grouped by agent there.
-  const reads = events.map((e, i) => ({ rel: rels[i], grp: e.grp, t: e.t || 0, span: e.inst ? parseRange(e.inst.a) : null })).filter(r => r.rel);
+  const reads = events.map((e, i) => ({ rel: rels[i], path: paths[i] || "", grp: e.grp, t: e.t || 0, span: e.inst ? parseRange(e.inst.a) : null })).filter(r => r.rel);
   const ident = stableAgentIdent(events);
 
   let h = `<div class="tagg-file-head"><span>root <code>${root ? escapeHtml(root) : "—"}</code></span><span><b>${Object.keys(counts).length}</b> files · <b>${events.length}</b> reads${outside ? ` · <b>${outside}</b> outside root <span class="muted">(full path)</span>` : ""}</span></div>`;
@@ -815,7 +818,7 @@ function buildFilePanel(bucket, ul) {
     const exp = inst ? " expandable" : "";
     const id = ident.get(e.grp);
     const srcKey = (id ? id.short : e.grp || "") + " " + (e.dbg || "");
-    h += `<tr class="srow${exp}" data-ord="${ord}" data-t="${e.t || 0}" data-file="${escapeHtml(rel.toLowerCase())}" data-reads="${cnt || 0}" data-range="${escapeHtml(range.toLowerCase())}" data-res="${resLen}" data-dur="${dur}" data-src="${escapeHtml(srcKey.toLowerCase())}" data-aic="${e.aic || 0}">
+    h += `<tr class="srow${exp}" data-ord="${ord}" data-t="${e.t || 0}" data-file="${escapeHtml(rel.toLowerCase())}" data-path="${escapeHtml((paths[ei] || rel).toLowerCase())}" data-reads="${cnt || 0}" data-range="${escapeHtml(range.toLowerCase())}" data-res="${resLen}" data-dur="${dur}" data-src="${escapeHtml(srcKey.toLowerCase())}" data-aic="${e.aic || 0}">
       <td class="num">${ord + 1}</td>
       <td>${hms(e.t || 0)}</td>
       <td>${inst ? `<span class="caret">▸</span>` : ""}<span class="fpath${ext ? " ext" : ""}" title="${escapeHtml(paths[ei] || "")}">${ext ? "↗ " : ""}${escapeHtml(rel)}</span></td>
@@ -874,7 +877,7 @@ function buildLineHeatmap(reads) {
   const fileMap = new Map();
   reads.forEach(r => {
     let f = fileMap.get(r.rel);
-    if (!f) { f = { rel: r.rel, reads: 0, spans: [], byAgent: new Map() }; fileMap.set(r.rel, f); }
+    if (!f) { f = { rel: r.rel, path: r.path || r.rel, reads: 0, spans: [], byAgent: new Map() }; fileMap.set(r.rel, f); }
     f.reads++; if (r.span) f.spans.push(r.span);
     let a = f.byAgent.get(r.grp);
     if (!a) { a = { reads: 0, spans: [] }; f.byAgent.set(r.grp, a); }
@@ -894,7 +897,7 @@ function buildLineHeatmap(reads) {
       return `<i class="heat-swatch" style="background:${id.color}" title="${escapeHtml(g)}">${id.icon}</i>`;
     }).join("") + (agents.length > 6 ? `<span class="muted heat-more">+${agents.length - 6}</span>` : "");
 
-    h += `<div class="heat-file${expandable ? " expandable" : ""}" data-hf="${fi}">
+    h += `<div class="heat-file${expandable ? " expandable" : ""}" data-hf="${fi}" data-path="${escapeHtml((f.path || f.rel).toLowerCase())}">
       <div class="heat-meta">
         <span class="heat-left">${expandable ? `<span class="caret">▸</span>` : `<span class="caret-sp"></span>`}<span class="heat-agents">${swatches}</span><span class="fpath" title="${escapeHtml(f.rel)}">${escapeHtml(f.rel)}</span></span>
         <span class="heat-stat"><b>${f.reads}</b> reads${expandable ? ` · <b>${agents.length}</b> agents` : ""} · ${fmt(maxLine)} lines · peak <b style="color:${heatColor(maxC)}">${maxC}×</b></span>
@@ -941,7 +944,10 @@ function buildGenericPanel(bucket, ul) {
     const exp = inst ? " expandable" : "";
     const id = ident.get(e.grp);
     const srcKey = (id ? id.short : e.grp || "") + " " + (e.dbg || "");
-    h += `<tr class="srow${exp}" data-ord="${ord}" data-t="${e.t || 0}" data-gist="${escapeHtml(gist.toLowerCase())}" data-res="${resLen}" data-dur="${dur}" data-src="${escapeHtml(srcKey.toLowerCase())}" data-aic="${e.aic || 0}">
+    // for the global path filter: any file paths in the args, falling back to the gist
+    // text so path-bearing args of non-file tools (grep patterns, commands) still match.
+    const pathKey = (inst ? toolFilePaths(inst.a).join(" ") : "") || gist;
+    h += `<tr class="srow${exp}" data-ord="${ord}" data-t="${e.t || 0}" data-path="${escapeHtml(pathKey.toLowerCase())}" data-gist="${escapeHtml(gist.toLowerCase())}" data-res="${resLen}" data-dur="${dur}" data-src="${escapeHtml(srcKey.toLowerCase())}" data-aic="${e.aic || 0}">
       <td class="num">${ord + 1}</td>
       <td>${hms(e.t || 0)}</td>
       <td>${inst ? `<span class="caret">▸</span>` : ""}<span class="fpath">${escapeHtml(gist)}</span></td>
@@ -1119,7 +1125,7 @@ function buildFileAggTable(files, toolCol, ident) {
     const regions = maxLine
       ? `<span class="mini-heat" title="${spans.length} ranged action${spans.length > 1 ? "s" : ""} over ~${fmt(maxLine)} lines">${lineHeatStrip(spans, maxLine).svg}<span class="mini-heat-max">${fmt(maxLine)}</span></span>`
       : `<span style="color:#444">—</span>`;
-    h += `<tr class="srow expandable" data-ord="${fi}" data-file="${escapeHtml(f.rel.toLowerCase())}" data-n="${f.events.length}" data-tools="${escapeHtml(toolKey.toLowerCase())}" data-lines="${maxLine}" data-res="${f.res}" data-dur="${f.dur}" data-src="${escapeHtml([...f.agents].join(" ").toLowerCase())}">
+    h += `<tr class="srow expandable" data-ord="${fi}" data-file="${escapeHtml(f.rel.toLowerCase())}" data-path="${escapeHtml((f.path || f.rel).toLowerCase())}" data-n="${f.events.length}" data-tools="${escapeHtml(toolKey.toLowerCase())}" data-lines="${maxLine}" data-res="${f.res}" data-dur="${f.dur}" data-src="${escapeHtml([...f.agents].join(" ").toLowerCase())}">
       <td class="num">${fi + 1}</td>
       <td><span class="caret">▸</span><span class="fpath${f.ext ? " ext" : ""}" title="${escapeHtml(f.path)}">${f.ext ? "↗ " : ""}${escapeHtml(f.rel)}</span></td>
       <td class="num">${f.events.length}</td>
@@ -1359,6 +1365,43 @@ function wireHeatExpand(rightEl) {
   });
 }
 
+// One top-level file-path filter for the whole detail pane. Case-insensitive substring
+// match against the FULL path (so "/docs" finds everything under any docs folder),
+// applied to every element that carries data-path: the by-tool per-tool tables, the
+// read_file line heatmap, and the by-file table. Generic-tool rows match on file paths
+// pulled from their args (falling back to the arg gist). Persists via DFILTER/the URL.
+function applyDetailFilter(rightEl) {
+  const q = DFILTER.trim().toLowerCase();
+  let shown = 0, total = 0;
+  rightEl.querySelectorAll("tr.srow[data-path]").forEach(row => {
+    const hit = !q || (row.dataset.path || "").includes(q);
+    total++; if (hit) shown++;
+    row.hidden = !hit;
+    const d = row.nextElementSibling;
+    if (d && d.classList.contains("srow-detail")) d.hidden = !hit; // .collapsed still governs when shown
+  });
+  rightEl.querySelectorAll(".heat-file[data-path]").forEach(el => {
+    const hit = !q || (el.dataset.path || "").includes(q);
+    total++; if (hit) shown++;
+    el.hidden = !hit;
+    const split = el.nextElementSibling;
+    if (split && split.classList.contains("heat-split")) split.hidden = !hit;
+  });
+  const count = rightEl.querySelector("#dfilterCount");
+  if (count) count.textContent = q ? `${shown} / ${total} rows match` : "";
+}
+
+function wireDetailFilter(rightEl) {
+  const input = rightEl.querySelector("#dviewFilter");
+  if (!input) return;
+  input.addEventListener("input", () => {
+    DFILTER = input.value;
+    applyDetailFilter(rightEl);
+    syncUrl();
+  });
+  if (DFILTER) applyDetailFilter(rightEl);
+}
+
 // Click-to-expand rows in the per-tool file/invocation tables (params + result).
 function wireFileRows(rightEl) {
   rightEl.querySelectorAll("tr.srow.expandable").forEach(row => {
@@ -1409,6 +1452,7 @@ let MODAL_SID = null;
 let DVIEW = "turns";    // "turns" | "tools" | "files"
 let DTAB = "overview";  // by-tool tab: "overview" or a tool name (falls back if absent)
 let RFVIEW = "table";   // read_file panel: "table" | "heatmap"
+let DFILTER = "";       // file-path substring filter, applied across the by-tool and by-file views
 
 async function openModal(sid, maxTok) {
   const modal = document.getElementById("modal");
@@ -1454,6 +1498,7 @@ async function openModal(sid, maxTok) {
   wireRfViews(right);
   wireHeatExpand(right);
   wireFileRows(right);
+  wireDetailFilter(right);
   right.querySelectorAll("table.tagg-files").forEach(wireSortable);
   stickCallsHeader(right);
 }
@@ -1758,6 +1803,7 @@ function syncUrl(push = false) {
   if (DVIEW !== URL_DEFAULTS.dview) p.set("dview", DVIEW);
   if (DTAB !== URL_DEFAULTS.dtab) p.set("dtab", DTAB);
   if (RFVIEW !== URL_DEFAULTS.rfview) p.set("rfview", RFVIEW);
+  if (DFILTER) p.set("dfilter", DFILTER);
   if (HELP_OPEN) p.set("help", "1");
   const qs = p.toString();
   const url = qs ? `${location.pathname}?${qs}` : location.pathname;
@@ -1796,6 +1842,7 @@ function applyUrlState() {
     DVIEW = ["turns", "tools", "files"].includes(p.get("dview")) ? p.get("dview") : URL_DEFAULTS.dview;
     DTAB = p.get("dtab") || URL_DEFAULTS.dtab;
     RFVIEW = p.get("rfview") === "heatmap" ? "heatmap" : URL_DEFAULTS.rfview;
+    DFILTER = p.get("dfilter") || "";
     const sid = p.get("session");
     if (sid && sid !== MODAL_SID) openModal(sid);
     else if (!sid && MODAL_SID) closeModal();

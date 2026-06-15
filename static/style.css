@@ -206,6 +206,13 @@ tr.tools td { padding: 0; background: #0d1117; }
 .kid-section { background: #21262d; color: #8b949e; padding: 5px 8px; font-size: 11px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 
 /* ---------- Detail view toggle (turns / by tool) ---------- */
+.dview-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
+.dview-controls .dview-toggle { margin-top: 0; }
+.dfilter-wrap { display: inline-flex; align-items: center; gap: 8px; }
+input.dfilter { background: var(--row); border: 1px solid var(--border); color: var(--fg); font-family: inherit; font-size: 11px; height: 24px; padding: 0 8px; border-radius: 4px; width: 250px; }
+input.dfilter:focus { outline: none; border-color: var(--blue); }
+input.dfilter::placeholder { color: var(--mute); }
+.dfilter-count { font-size: 10.5px; color: var(--mute); white-space: nowrap; }
 .dview-toggle { margin-top: 10px; margin-bottom: 0; }
 .dview-toggle .dview-btn { background: var(--row); color: var(--mute); border: 1px solid var(--border); padding: 0 12px; height: 24px; cursor: pointer; font-size: 11px; line-height: 22px; }
 .dview-toggle .dview-btn:first-child { border-radius: 4px 0 0 4px; }
@@ -317,6 +324,9 @@ tr.srow-detail > td { padding: 0; background: #0b0e13; }
 .heat-key { white-space: nowrap; }
 /* condensed file row (one combined strip per file) */
 .heat-file { display: flex; flex-direction: column; gap: 3px; padding: 7px 12px; border-bottom: 1px solid #161b22; }
+/* the global path filter hides rows via the hidden attribute; the display:flex above
+   would otherwise out-specificity the UA's [hidden] rule */
+.heat-file[hidden], .heat-split[hidden] { display: none; }
 .heat-file.expandable { cursor: pointer; }
 .heat-file.expandable:hover { background: #11151c; }
 .heat-meta { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; font-size: 11px; }
