@@ -428,7 +428,8 @@ function firstLine(s) { return oneLine(String(s ?? "").split("\n")[0]); }
 function toolFailReason(t) {
   if (!t) return "";
   const st = String(t.s ?? "").toLowerCase();
-  const statusBad = st && st !== "ok" && st !== "success" && st !== "?";
+  const okStatuses = new Set(["ok", "success", "completed", "complete", "?"]);
+  const statusBad = st && !okStatuses.has(st);
   const s = String(t.res ?? "").replace(/^\s+/, "");
   if (!s) return statusBad ? st : "";
   const sl = s.toLowerCase();

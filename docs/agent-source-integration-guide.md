@@ -428,8 +428,8 @@ After adding or changing a source adapter, run:
 
 ```sh
 node --check static/app.js
-python3 -m py_compile analyzer.py app.py tests/test_analyzer.py
-uv run python -m unittest discover -s tests
+uv run python -m py_compile analyzer.py app.py tests/test_analyzer.py
+uv run pytest
 ```
 
 Then smoke test the running app:

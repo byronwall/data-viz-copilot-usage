@@ -72,6 +72,16 @@ uv run app.py --port 8000 --host 0.0.0.0 --debug
 
 uv will create `.venv/` and install Flask on the first run; subsequent runs are instant.
 
+## Test
+
+Install dev dependencies and run the unit suite with:
+
+```sh
+uv run pytest
+```
+
+The tests live in `tests/` and use hermetic fixtures for Codex state instead of reading live local agent history.
+
 ## What you see
 
 - **Default view**: top 50 sessions from the last 24h, sorted by total input tokens.
