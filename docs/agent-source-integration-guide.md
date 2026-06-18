@@ -10,15 +10,22 @@ totals, metadata, and a flag that says whether exact cost is available.
 
 ## Current sources
 
-The app now supports two local data sources:
+The app now supports three local data sources:
 
 | Source | Primary storage | Request usage | Child linkage | Exact cost |
 | --- | --- | --- | --- | --- |
 | Copilot | VS Code `workspaceStorage/*/GitHub.copilot-chat/debug-logs/*` | `request` entries in `main.jsonl` and sibling JSONL files | Sibling `runSubagent-*` and `title-*` files; search subagents are inferred by matching tool calls | Yes, from `models.json` billing metadata |
 | Codex | `CODEX_USAGE_HOME`, `CODEX_HOME`, or `~/.codex` | Rollout `event_msg` records whose payload type is `token_count` | `thread_spawn_edges` in `state_5.sqlite`, with rollout fallback metadata | No, rollout logs expose tokens but not AIC or dollar billing |
+| Claude | `CLAUDE_USAGE_HOME`, `CLAUDE_CONFIG_DIR`, or `~/.claude` | `assistant` records' `message.usage` in `projects/*/*.jsonl`, deduped per `requestId` | `isSidechain` turns in the same transcript, folded into one `sub-agents` child | No, transcripts expose tokens but not AIC or dollar billing |
 
-The user-facing source filter is intentionally small: `all`, `copilot`, and
-`codex`. Everything else is normalized behind the API boundary.
+The user-facing source filter is intentionally small: `all`, `copilot`,
+`codex`, and `claude`. Everything else is normalized behind the API boundary.
+
+Note that the Claude Code CLI and the Claude Desktop app share the same
+`projects/*/*.jsonl` transcript tree (Desktop runs Claude Code under the hood), so a
+single `claude` adapter covers both. Desktop additionally writes per-session metadata
+(title, model, effort) keyed by `cliSessionId`; the adapter reads those only to enrich
+titles/effort and degrades cleanly when Desktop is absent.
 
 ## What changed for Codex
 
@@ -38,6 +45,43 @@ The major code areas are:
 - `tests/test_analyzer.py`: fixtures for Codex token counts, tool attribution,
   child folding, source filtering, daily usage, and state DB selection.
 - `.gitignore`: daily Codex token cache.
+
+## What changed for Claude
+
+Claude support followed the same recipe as Codex: a third backend adapter in
+`analyzer.py`, then a `source=claude` value threaded through the existing API and
+frontend. The adapter is simpler than Codex because there is no index DB — each
+`projects/<encoded-cwd>/<sessionId>.jsonl` transcript is one session.
+
+Key parser rules specific to Claude:
+
+- **Dedupe by `requestId`.** One logical model request is split across several
+  `assistant` JSONL lines (thinking, text, one per `tool_use`) that all repeat the
+  *same cumulative* `message.usage`. Emit one normalized `req` per `requestId` (falling
+  back to `message.id`) and ignore later lines for token totals.
+- **Token mapping.** Anthropic's `input_tokens` is the fresh, uncached prompt only, so
+  the viewer's `input` is `input_tokens + cache_read_input_tokens +
+  cache_creation_input_tokens` and `cached` is `cache_read_input_tokens`. That keeps
+  `uncached = input - cached` and the cache-hit rate consistent with Copilot/Codex,
+  where `input` is the whole prompt and `cached` a subset of it. See
+  `_claude_request_tokens()`.
+- **Tool attribution falls out of file order.** A `tool_use` block lives in the
+  assistant request that emitted it; its `tool_result` arrives in the next `user`
+  record, *before* the next assistant request. Emitting the `tool` event at the
+  `tool_result` line (looking up name/args from a `tool_use_id` map) makes
+  `build_series()` attach it to the next request that consumed the output — no
+  Codex-style `pending_after_req` reordering is needed because usage rides on the
+  assistant line itself.
+- **Sub-agents.** Task-tool sub-agents are logged inline in the same transcript with
+  `isSidechain: true`. Those requests are split into a single `sub-agents` child group
+  and folded into the parent totals, mirroring Copilot `runSubagent-*` and Codex
+  spawned children.
+- **Compaction.** Records with `isCompactSummary: true` or `subtype:
+  "compact_boundary"` become zero-token `req` events with the `compacted` debug name
+  (a `COMPACT_NAMES` member).
+- **Cost.** Transcripts expose tokens but no AIC/dollar billing, so `cost_available` is
+  `False`, `total_aic` is `0`, and public payloads return `total_aic: null` — exactly
+  like Codex.
 
 ## Codex data discovery
 
@@ -264,16 +308,17 @@ That is how the charts mark human turns with a star.
 
 The backend exposes source-aware endpoints while keeping the payload shape stable:
 
-- `GET /api/sessions?source=all|copilot|codex&...`
+- `GET /api/sessions?source=all|copilot|codex|claude&...`
 - `GET /api/session/<source:sid>`
-- `GET /api/daily_usage?source=all|copilot|codex`
-- `GET /api/stats?source=all|copilot|codex&since_hours=24`
+- `GET /api/daily_usage?source=all|copilot|codex|claude`
+- `GET /api/stats?source=all|copilot|codex|claude&since_hours=24`
 
 Session IDs are namespaced at the API boundary with `public_sid()`:
 
 ```text
 copilot:<raw-copilot-session-id>
 codex:<raw-codex-thread-id>
+claude:<raw-claude-session-id>
 ```
 
 `get_session()` accepts the namespaced ID and uses the prefix as a source hint.
@@ -290,12 +335,13 @@ metric. The current rule is:
 
 - `source=copilot`: metric is AIC, with optional UI conversion to dollars.
 - `source=codex`: metric is input tokens.
+- `source=claude`: metric is input tokens.
 - `source=all`: metric is input tokens across available sources.
 
-Codex daily usage is scanned directly from rollout `token_count` events and
-cached on disk in `.daily_codex_cache.json`. Cache entries are keyed by rollout
-path with an mtime/size signature, so historical scans stay fast without
-pretending the source logs are immutable.
+Codex and Claude daily usage are scanned directly from their token records and
+cached on disk in `.daily_codex_cache.json` / `.daily_claude_cache.json`. Cache
+entries are keyed by file path with an mtime/size signature, so historical scans
+stay fast without pretending the source logs are immutable.
 
 For a future source, decide early whether the daily calendar should show exact
 cost, input tokens, or a source-specific metric. Then return:
@@ -443,6 +489,7 @@ Open:
 - `http://127.0.0.1:5057/?source=all&hours=720`
 - `http://127.0.0.1:5057/?source=codex&hours=720`
 - `http://127.0.0.1:5057/?source=copilot&hours=720`
+- `http://127.0.0.1:5057/?source=claude&hours=720`
 
 Check that:
 

@@ -13,6 +13,14 @@ they appear in the main list as just another session (no parent linkage in the l
 Codex layout on disk (under CODEX_HOME / ~/.codex):
   state_5.sqlite or sqlite/state_5.sqlite thread index + parent/child edges
   sessions/<yyyy>/<mm>/<dd>/rollout-*.jsonl
+
+Claude layout on disk (under CLAUDE_CONFIG_DIR / ~/.claude):
+  projects/<encoded-cwd>/<sessionId>.jsonl  -- one transcript per session
+
+Both the Claude Code CLI and the Claude Desktop app write transcripts to this same
+projects/ tree (Desktop runs Claude Code under the hood). Desktop additionally keeps
+small per-session metadata files (title, model, effort) keyed by `cliSessionId` under
+its application-support dir; we use those only to enrich titles/effort when present.
 """
 from __future__ import annotations
 import os, sys, json, glob, time, math, re, sqlite3, copy
@@ -52,6 +60,38 @@ def _default_codex_home() -> str:
 
 
 CODEX_BASE = _default_codex_home()
+
+
+def _default_claude_home() -> str:
+    """Locate Claude's local state directory (Claude Code CLI and Claude Desktop).
+
+    CLAUDE_USAGE_HOME is viewer-specific; CLAUDE_CONFIG_DIR matches Claude Code itself.
+    """
+    env = os.environ.get("CLAUDE_USAGE_HOME") or os.environ.get("CLAUDE_CONFIG_DIR")
+    return os.path.expanduser(env) if env else os.path.expanduser("~/.claude")
+
+
+def _default_claude_desktop_sessions() -> str:
+    """Locate the Claude Desktop per-session metadata dir for the current platform.
+
+    These files only carry titles/model/effort keyed by cliSessionId; the actual
+    transcripts live under the shared ~/.claude/projects tree. Override with
+    CLAUDE_DESKTOP_SESSIONS if your install is non-standard.
+    """
+    env = os.environ.get("CLAUDE_DESKTOP_SESSIONS")
+    if env:
+        return os.path.expanduser(env)
+    if sys.platform == "darwin":
+        root = os.path.expanduser("~/Library/Application Support")
+    elif sys.platform == "win32":
+        root = os.environ.get("APPDATA", os.path.expanduser("~/AppData/Roaming"))
+    else:  # linux / other unix
+        root = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    return os.path.join(root, "Claude", "claude-code-sessions")
+
+
+CLAUDE_BASE = _default_claude_home()
+CLAUDE_DESKTOP_SESSIONS = _default_claude_desktop_sessions()
 COMPACT_NAMES = {
     "summarizeConversationHistory",
     "summarizeConversationHistory-simple",
@@ -59,7 +99,7 @@ COMPACT_NAMES = {
     "context_compacted",
     "compacted",
 }
-SOURCES = {"all", "copilot", "codex"}
+SOURCES = {"all", "copilot", "codex", "claude"}
 # Requests VS Code sends with interactionTypeOverride:"conversation-background" — the
 # extension excludes their copilot usage from the per-turn credit badge, so we must too
 # (see setLastCopilotUsage gating in the copilot-chat bundle).
@@ -81,6 +121,7 @@ _MODELS_CACHE: dict[str, tuple[float, dict]] = {}  # session_dir -> (mtime, {mod
 _GLOBAL_PRICES: dict[str, dict] | None = None  # union across all models.json with non-null billing
 _GLOBAL_PRICES_BUILT_AT: float = 0.0
 _CODEX_SESSION_CACHE: dict[str, tuple[float, Optional["Session"]]] = {}
+_CLAUDE_SESSION_CACHE: dict[str, tuple[tuple, Optional["Session"]]] = {}  # path -> (signature, Session)
 
 
 def _parse_billing(m: dict) -> dict | None:
@@ -391,6 +432,7 @@ def _load_jsonl(path: str) -> dict:
 # (name/mtime/size of every *.jsonl + models.json), so only changed sessions recompute.
 DAILY_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".daily_aic_cache.json")
 DAILY_CODEX_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".daily_codex_cache.json")
+DAILY_CLAUDE_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".daily_claude_cache.json")
 
 
 def _session_dir_signature(sess_dir: str) -> list:
@@ -500,9 +542,12 @@ def daily_usage(source: str = "copilot") -> dict:
         return {"days": daily_aic(), "metric": "aic", "unit": "AIC", "cost": True}
     if source == "codex":
         return {"days": daily_codex_tokens(), "metric": "input_tokens", "unit": "input tokens", "cost": False}
+    if source == "claude":
+        return {"days": daily_claude_tokens(), "metric": "input_tokens", "unit": "input tokens", "cost": False}
     days = daily_copilot_tokens()
-    for d, v in daily_codex_tokens().items():
-        days[d] = days.get(d, 0.0) + v
+    for src_days in (daily_codex_tokens(), daily_claude_tokens()):
+        for d, v in src_days.items():
+            days[d] = days.get(d, 0.0) + v
     return {"days": days, "metric": "input_tokens", "unit": "input tokens", "cost": False}
 
 
@@ -1484,6 +1529,545 @@ def daily_codex_tokens() -> dict[str, float]:
     return totals
 
 
+# ---------- Claude Code / Claude Desktop session support ----------
+
+# Both surfaces write the same transcript format to <CLAUDE_BASE>/projects/<dir>/<sid>.jsonl.
+# Records are line-delimited JSON. The records we care about:
+#   {"type":"assistant","requestId":..,"message":{"model":..,"usage":{...},"content":[..]}}
+#   {"type":"user","message":{"content":<str | [text|tool_result blocks]>}}
+#   {"isCompactSummary":true,...} / {"subtype":"compact_boundary",...}  -> context compaction
+# One logical model request is split across several assistant lines (thinking / text /
+# tool_use) that all repeat the SAME cumulative usage, so we dedupe by requestId.
+
+
+def _claude_transcript_glob() -> list[str]:
+    return sorted(glob.glob(os.path.join(CLAUDE_BASE, "projects", "*", "*.jsonl")))
+
+
+def _claude_desktop_meta() -> dict[str, dict]:
+    """Map cliSessionId -> {title, effort, model} from Claude Desktop session metadata.
+
+    Used only to enrich transcripts (titles, reasoning effort); transcripts remain the
+    source of truth. Returns {} when Desktop is not installed.
+    """
+    base = CLAUDE_DESKTOP_SESSIONS
+    out: dict[str, dict] = {}
+    if not os.path.isdir(base):
+        return out
+    for fp in glob.glob(os.path.join(base, "**", "local_*.json"), recursive=True):
+        try:
+            with open(fp) as f:
+                o = json.load(f)
+        except Exception:
+            continue
+        cli = o.get("cliSessionId")
+        if not cli:
+            continue
+        out[cli] = {
+            "title": o.get("title") or "",
+            "effort": o.get("effort") or "",
+            "model": o.get("model") or "",
+        }
+    return out
+
+
+def _claude_content_text(content) -> str:
+    """Flatten an assistant/user content value to plain text (text blocks only)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text":
+                parts.append(b.get("text") or "")
+        return "\n".join(p for p in parts if p)
+    return ""
+
+
+def _claude_tool_result_text(block: dict) -> str:
+    c = block.get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        parts = []
+        for b in c:
+            if isinstance(b, dict):
+                parts.append(b.get("text") or "" if b.get("type") == "text" else _short_json(b, 2000))
+        return "\n".join(p for p in parts if p)
+    return _short_json(c, 2000)
+
+
+def _claude_request_tokens(usage: dict) -> tuple[int, int, int]:
+    """Return (total_input, cached, output) from an Anthropic usage block.
+
+    input_tokens is the fresh (uncached) prompt only, so total prompt =
+    input_tokens + cache_read + cache_creation. `cached` is the cache-read subset, so
+    the viewer's uncached = input - cached = input_tokens + cache_creation, matching the
+    Copilot/Codex convention where `input` is the whole prompt and `cached` a part of it.
+    """
+    fresh = int(usage.get("input_tokens", 0) or 0)
+    cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
+    cache_creation = int(usage.get("cache_creation_input_tokens", 0) or 0)
+    out = int(usage.get("output_tokens", 0) or 0)
+    return fresh + cache_read + cache_creation, cache_read, out
+
+
+# Anthropic standard-tier pricing, USD per 1,000,000 tokens (retrieved 2026-06-18).
+# Priced per TIER (family), not per minor version — matched by substring in the model id.
+_CLAUDE_TIER_PRICES_USD = {
+    # tier:   (input, output, cache_write_5m, cache_read)
+    "opus":   (5.00, 25.00, 6.25, 0.50),
+    "sonnet": (3.00, 15.00, 3.75, 0.30),
+    "haiku":  (1.00, 5.00, 1.25, 0.10),
+    "fable":  (10.00, 50.00, 12.50, 1.00),
+}
+# Legacy ids matched BEFORE family matching (exact-id substring).
+_CLAUDE_LEGACY_PRICES_USD = {
+    "claude-opus-4-1": (15.00, 75.00, 18.75, 1.50),
+    "claude-haiku-3-5": (0.80, 4.00, 1.00, 0.08),
+}
+
+
+def _claude_price(model_id: str | None) -> Optional[dict]:
+    """AIC-per-token price dict for a Claude model id, or None if no tier matches.
+
+    AIC = USD * 100, and these tables are USD per 1,000,000 tokens, so the
+    per-token AIC factor is usd_per_million / 1_000_000 * 100.
+    A <synthetic> id (or any id with no tier match) returns None -> 0 cost.
+    """
+    if not model_id:
+        return None
+    mid = model_id.lower()
+    usd = None
+    for legacy_id, prices in _CLAUDE_LEGACY_PRICES_USD.items():
+        if legacy_id in mid:
+            usd = prices
+            break
+    if usd is None:
+        for tier, prices in _CLAUDE_TIER_PRICES_USD.items():
+            if tier in mid:
+                usd = prices
+                break
+    if usd is None:
+        return None
+    inp, out, cw, cr = usd
+    f = 1.0 / 1_000_000 * 100  # USD/Mtok -> AIC/token
+    return {"input": inp * f, "output": out * f, "cache_write": cw * f, "cache_read": cr * f}
+
+
+def _claude_req_aic(r: dict) -> float:
+    """Estimated AIC cost for a single Claude req event."""
+    p = _claude_price(r.get("model"))
+    if p is None:
+        return 0.0
+    cached = r.get("cached", 0) or 0
+    cache_creation = r.get("cache_creation", 0) or 0
+    fresh = max(0, (r.get("input", 0) or 0) - cached - cache_creation)
+    out = r.get("output", 0) or 0
+    cost = (fresh * p["input"] + cached * p["cache_read"]
+            + cache_creation * p["cache_write"] + out * p["output"])
+    return cost if cost > 0 else 0.0
+
+
+def _req_cost_aic(sess: "Session", c: dict) -> Optional[float]:
+    """Source-aware per-call AIC dispatch."""
+    if not sess.cost_available:
+        return None
+    if sess.source == "claude":
+        return _claude_req_aic(c)
+    return _aic_for_req(c, sess.models_info)
+
+
+def _parse_claude_stream(path: str, effort: str = "", model_hint: str = "?"):
+    """Parse one Claude transcript file (main OR sub-agent — identical line format).
+
+    Returns a dict with:
+      main_events   - non-sidechain events (req/user/tool) in file order
+      side_events   - isSidechain events (legacy inline sub-agents)
+      t0            - earliest timestamp ms (or None)
+      last_ts       - latest timestamp ms
+      first_user    - first non-empty MAIN user message (truncated 240ch)
+      model_counts  - {model_id: req-count} for non-compaction reqs
+      cwd           - first cwd seen
+      tool_use_map  - {tool_use_id: {name, args}}
+      agent_spawns  - {agentId: {subagent_type, description}} resolved from Agent
+                      tool_use calls + their tool_results' "agentId: <hex>" text
+    """
+    main_events: list[dict] = []
+    side_events: list[dict] = []
+    first_user = ""
+    t0 = None
+    last_ts = 0
+    cwd = ""
+    model_counts: dict[str, int] = {}
+    seen_reqs: set[str] = set()
+    tool_use_map: dict[str, dict] = {}  # tool_use_id -> {name, args}
+    agent_calls: dict[str, dict] = {}   # Agent tool_use_id -> input dict
+    agent_spawns: dict[str, dict] = {}  # agentId -> {subagent_type, description}
+    current_model = model_hint or "?"
+
+    with open(path) as f:
+        for line in f:
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            ts = _parse_iso_ms(d.get("timestamp"))
+            if ts:
+                t0 = min(t0 or ts, ts)
+                last_ts = max(last_ts, ts)
+            if not cwd and d.get("cwd"):
+                cwd = d.get("cwd")
+            sink = side_events if d.get("isSidechain") else main_events
+            msg = d.get("message") if isinstance(d.get("message"), dict) else {}
+
+            if d.get("isCompactSummary") is True or d.get("subtype") == "compact_boundary":
+                sink.append({
+                    "kind": "req", "ts": ts or last_ts, "input": 0, "cached": 0,
+                    "cache_creation": 0, "output": 0,
+                    "reasoning_output": 0, "debugName": "compacted", "ttft": 0,
+                    "model": current_model or "?", "reasoning": effort,
+                    "nano_aiu": None, "is_error": False, "error": "",
+                })
+                continue
+
+            if d.get("type") == "assistant":
+                content = msg.get("content")
+                model = msg.get("model")
+                if model:
+                    current_model = model
+                if isinstance(content, list):
+                    for b in content:
+                        if isinstance(b, dict) and b.get("type") == "tool_use":
+                            tool_use_map[b.get("id")] = {
+                                "name": b.get("name") or "?",
+                                "args": _short_json(b.get("input"), 4000),
+                            }
+                            if b.get("name") == "Agent" and isinstance(b.get("input"), dict):
+                                agent_calls[b.get("id")] = b.get("input")
+                usage = msg.get("usage") if isinstance(msg.get("usage"), dict) else None
+                rid = d.get("requestId") or msg.get("id")
+                if usage and rid and rid not in seen_reqs:
+                    total_in, cache_read, out = _claude_request_tokens(usage)
+                    if total_in or out:
+                        seen_reqs.add(rid)
+                        cache_creation = int(usage.get("cache_creation_input_tokens", 0) or 0)
+                        mdl = model or current_model or "?"
+                        model_counts[mdl] = model_counts.get(mdl, 0) + 1
+                        sink.append({
+                            "kind": "req", "ts": ts or last_ts,
+                            "input": total_in, "cached": cache_read,
+                            "cache_creation": cache_creation, "output": out,
+                            "reasoning_output": 0, "debugName": "claude", "ttft": 0,
+                            "model": mdl, "reasoning": effort, "nano_aiu": None,
+                            "is_error": msg.get("stop_reason") == "error",
+                            "error": "",
+                        })
+                continue
+
+            if d.get("type") == "user":
+                content = msg.get("content")
+                if isinstance(content, str):
+                    if content.strip():
+                        sink.append({"kind": "user", "ts": ts or last_ts, "text": _short(content, 600)})
+                        if sink is main_events and not first_user:
+                            first_user = content[:240]
+                elif isinstance(content, list):
+                    had_tool = False
+                    for b in content:
+                        if not isinstance(b, dict) or b.get("type") != "tool_result":
+                            continue
+                        had_tool = True
+                        tuid = b.get("tool_use_id")
+                        # Resolve Agent-spawn linkage: the tool_result for an Agent
+                        # tool_use carries "agentId: <hex>" identifying the sub-agent file.
+                        if tuid in agent_calls:
+                            m = re.search(r"agentId: ([a-f0-9]+)", _short_json(b.get("content"), 4000))
+                            if m:
+                                inp = agent_calls[tuid]
+                                agent_spawns[m.group(1)] = {
+                                    "subagent_type": inp.get("subagent_type") or "",
+                                    "description": inp.get("description") or "",
+                                }
+                        call = tool_use_map.get(tuid) or {}
+                        sink.append({
+                            "kind": "tool", "ts": ts or last_ts,
+                            "name": call.get("name") or "tool",
+                            "args": call.get("args") or "",
+                            "result": _result_text(_claude_tool_result_text(b), 2000),
+                            "dur": 0,
+                            "status": "error" if b.get("is_error") else "ok",
+                        })
+                    if not had_tool:
+                        txt = _claude_content_text(content)
+                        if txt.strip():
+                            sink.append({"kind": "user", "ts": ts or last_ts, "text": _short(txt, 600)})
+                            if sink is main_events and not first_user:
+                                first_user = txt[:240]
+                continue
+
+    return {
+        "main_events": main_events, "side_events": side_events,
+        "t0": t0, "last_ts": last_ts, "first_user": first_user,
+        "model_counts": model_counts, "cwd": cwd,
+        "tool_use_map": tool_use_map, "agent_spawns": agent_spawns,
+    }
+
+
+def _claude_session_signature(path: str) -> Optional[tuple]:
+    """Cache signature for a Claude session: main-file mtime plus each sub-agent
+    file's (name, mtime). Sub-agent files can change independently of the main file.
+    """
+    try:
+        main_mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    sub: list[tuple] = []
+    sub_dir = os.path.join(os.path.splitext(path)[0], "subagents")
+    try:
+        for sp in glob.glob(os.path.join(sub_dir, "agent-*.jsonl")):
+            try:
+                sub.append((os.path.basename(sp), os.path.getmtime(sp)))
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return (main_mtime, tuple(sorted(sub)))
+
+
+def _assemble_claude_session(path: str, desktop_meta: dict[str, dict] | None = None) -> Optional[Session]:
+    sig = _claude_session_signature(path)
+    if sig is None:
+        return None
+    cached = _CLAUDE_SESSION_CACHE.get(path)
+    if cached and cached[0] == sig:
+        return copy.deepcopy(cached[1]) if cached[1] else None
+    mtime = sig[0]
+
+    sid = os.path.basename(path)[:-6] if path.endswith(".jsonl") else os.path.basename(path)
+    meta = (desktop_meta or {}).get(sid) or {}
+    effort = meta.get("effort") or ""
+    title = meta.get("title") or ""
+
+    try:
+        parsed = _parse_claude_stream(path, effort=effort, model_hint=meta.get("model") or "?")
+    except OSError:
+        _CLAUDE_SESSION_CACHE[path] = (sig, None)
+        return None
+
+    main_events = parsed["main_events"]
+    side_events = parsed["side_events"]
+    first_user = parsed["first_user"]
+    t0 = parsed["t0"]
+    last_ts = parsed["last_ts"]
+    cwd = parsed["cwd"]
+    model_counts = parsed["model_counts"]
+    agent_spawns = parsed["agent_spawns"]
+    current_model = max(model_counts.items(), key=lambda x: x[1])[0] if model_counts else (meta.get("model") or "?")
+
+    reqs = [e for e in main_events if e["kind"] == "req"]
+    side_reqs = [e for e in side_events if e["kind"] == "req"]
+
+    children: list[dict] = []
+    child_reqs: list[dict] = []
+    # Modern Claude Code writes each Agent-tool sub-agent to its OWN transcript at
+    # <main-without-.jsonl>/subagents/agent-<agentId>.jsonl. The directory itself
+    # establishes parentage, so every agent-*.jsonl under it belongs to THIS session
+    # (these files are not picked up by the top-level session glob, so no double count).
+    # The main transcript's Agent-spawn map is used only to LABEL each child with its
+    # subagent_type when available — it's not reliable for inclusion (some completed
+    # agents' tool results don't carry the agentId back-reference).
+    new_children: list[dict] = []  # (first_req_ts, child_dict)
+    sub_dir = os.path.join(os.path.splitext(path)[0], "subagents")
+    for sp in sorted(glob.glob(os.path.join(sub_dir, "agent-*.jsonl"))):
+        m = re.match(r"agent-([a-f0-9]+)\.jsonl$", os.path.basename(sp))
+        agent_id = m.group(1) if m else os.path.basename(sp)
+        spawn = agent_spawns.get(agent_id) or {}
+        try:
+            cp = _parse_claude_stream(sp, effort=effort)
+        except OSError:
+            continue
+        cevents = sorted(cp["main_events"] + cp["side_events"], key=lambda e: e["ts"])
+        creqs = [e for e in cevents if e["kind"] == "req"]
+        if not creqs:
+            continue
+        subagent_type = spawn.get("subagent_type") or ""
+        slug = ""  # slug lives on each line; read it cheaply if needed
+        if subagent_type:
+            label = f"sub-agent {subagent_type}"
+        else:
+            try:
+                with open(sp) as sf:
+                    first_line = json.loads(sf.readline())
+                slug = first_line.get("slug") or ""
+            except Exception:
+                slug = ""
+            label = f"sub-agent {slug}" if slug else f"agent {agent_id[:8]}"
+        new_children.append((creqs[0]["ts"], {"events": cevents, "label": label}))
+        child_reqs.extend(creqs)
+        if cp["last_ts"]:
+            last_ts = max(last_ts, cp["last_ts"])
+
+    new_children.sort(key=lambda x: x[0])
+    children.extend(c for _, c in new_children)
+
+    # Backward-compat: legacy inline sidechains in the MAIN file.
+    if side_reqs:
+        children.append({"events": side_events, "label": "sub-agents"})
+        child_reqs.extend(side_reqs)
+
+    if (not reqs and not child_reqs) or t0 is None:
+        _CLAUDE_SESSION_CACHE[path] = (sig, None)
+        return None
+
+    main = {"events": main_events, "t0": t0, "first_user": first_user, "path": path}
+
+    all_reqs = reqs + child_reqs
+    total_aic = sum(_claude_req_aic(r) for r in all_reqs)
+    total_input = sum(r["input"] for r in all_reqs)
+    total_cached = sum(r["cached"] for r in all_reqs)
+    total_output = sum(r["output"] for r in all_reqs)
+    n_compact = sum(1 for r in all_reqs if r["debugName"] in COMPACT_NAMES)
+    top_model = max(model_counts.items(), key=lambda x: x[1])[0] if model_counts else (current_model or "?")
+    last_ts = last_ts or t0
+    if not first_user:
+        first_user = title or sid
+
+    sess = Session(
+        sid=sid,
+        workspace=cwd or "Claude",
+        mtime=mtime,
+        last_event_ts=last_ts,
+        main=main,
+        source="claude",
+        source_label="Claude",
+        path=path,
+        cost_available=True,
+        children=children,
+        total_input=total_input,
+        total_cached=total_cached,
+        total_output=total_output,
+        n_requests=len(all_reqs),
+        n_compactions=n_compact,
+        duration_ms=max(0, last_ts - t0),
+        top_model=top_model,
+        first_user=first_user,
+        total_aic=total_aic,
+        models_info={},
+    )
+    _CLAUDE_SESSION_CACHE[path] = (sig, sess)
+    return copy.deepcopy(sess)
+
+
+def query_claude_sessions(
+    since_seconds: float | None = None,
+    start_ts: float | None = None,
+    end_ts: float | None = None,
+    min_tokens: int = 0,
+    limit: int = 50,
+    sort: str = "total_input",
+) -> list[Session]:
+    win_start, win_end = resolve_window(since_seconds, start_ts, end_ts)
+    desktop_meta = _claude_desktop_meta()
+    sessions: list[Session] = []
+    for path in _claude_transcript_glob():
+        try:
+            if os.path.getmtime(path) < win_start or os.path.getsize(path) < 200:
+                continue
+        except OSError:
+            continue
+        s = _assemble_claude_session(path, desktop_meta)
+        if not s:
+            continue
+        started = (s.main["t0"] / 1000) if s.main.get("t0") else s.mtime
+        ended = max(s.last_event_ts / 1000, started)
+        if started > win_end or ended < win_start:
+            continue
+        if s.total_input < min_tokens:
+            continue
+        sessions.append(s)
+    sessions.sort(key=_query_sort_key(sort))
+    return sessions[:limit]
+
+
+def _daily_claude_for_file(path: str) -> dict[str, float]:
+    """Lightweight {YYYY-MM-DD: input_tokens} for one transcript; deduped by requestId."""
+    days: dict[str, float] = {}
+    seen: set[str] = set()
+    try:
+        with open(path) as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                if d.get("type") != "assistant":
+                    continue
+                msg = d.get("message") if isinstance(d.get("message"), dict) else {}
+                usage = msg.get("usage") if isinstance(msg.get("usage"), dict) else None
+                if not usage:
+                    continue
+                rid = d.get("requestId") or msg.get("id")
+                if not rid or rid in seen:
+                    continue
+                total_in, _, _ = _claude_request_tokens(usage)
+                if not total_in:
+                    continue
+                ts = _parse_iso_ms(d.get("timestamp"))
+                if not ts:
+                    continue
+                seen.add(rid)
+                day = time.strftime("%Y-%m-%d", time.localtime(ts / 1000))
+                days[day] = days.get(day, 0.0) + total_in
+    except OSError:
+        pass
+    return days
+
+
+def daily_claude_tokens() -> dict[str, float]:
+    """Total input tokens per local calendar day across Claude transcripts (disk-cached)."""
+    try:
+        with open(DAILY_CLAUDE_CACHE_PATH) as f:
+            cache = json.load(f)
+        if cache.get("version") != 1:
+            raise ValueError
+    except Exception:
+        cache = {"version": 1, "files": {}}
+    files_cache = cache["files"]
+    seen = set()
+    dirty = False
+    totals: dict[str, float] = {}
+    # Include Agent-tool sub-agent transcripts (siblings under <sid>/subagents/),
+    # which _claude_transcript_glob() does not pick up.
+    sub_glob = sorted(glob.glob(os.path.join(CLAUDE_BASE, "projects", "*", "*", "subagents", "agent-*.jsonl")))
+    for path in _claude_transcript_glob() + sub_glob:
+        seen.add(path)
+        sig = _codex_file_signature(path)
+        if not sig:
+            continue
+        cached = files_cache.get(path)
+        if not cached or cached.get("sig") != sig:
+            days = _daily_claude_for_file(path)
+            files_cache[path] = {"sig": sig, "days": days}
+            dirty = True
+        else:
+            days = cached.get("days", {})
+        for d, v in days.items():
+            totals[d] = totals.get(d, 0.0) + v
+    for path in [p for p in files_cache if p not in seen]:
+        del files_cache[path]
+        dirty = True
+    if dirty:
+        try:
+            tmp = DAILY_CLAUDE_CACHE_PATH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(cache, f)
+            os.replace(tmp, DAILY_CLAUDE_CACHE_PATH)
+        except OSError:
+            pass
+    return totals
+
+
 # ---------- Query API ----------
 
 def query_copilot_sessions(
@@ -1566,8 +2150,11 @@ def query_sessions(
         return query_copilot_sessions(since_seconds, start_ts, end_ts, min_tokens, limit, sort)
     if source == "codex":
         return query_codex_sessions(since_seconds, start_ts, end_ts, min_tokens, limit, sort)
+    if source == "claude":
+        return query_claude_sessions(since_seconds, start_ts, end_ts, min_tokens, limit, sort)
     sessions = query_copilot_sessions(since_seconds, start_ts, end_ts, min_tokens, limit, sort)
     sessions.extend(query_codex_sessions(since_seconds, start_ts, end_ts, min_tokens, limit, sort))
+    sessions.extend(query_claude_sessions(since_seconds, start_ts, end_ts, min_tokens, limit, sort))
     sessions.sort(key=_query_sort_key(sort))
     return sessions[:limit]
 
@@ -1575,14 +2162,14 @@ def query_sessions(
 def split_public_sid(sid: str) -> tuple[Optional[str], str]:
     if ":" in sid:
         src, raw = sid.split(":", 1)
-        if src in {"copilot", "codex"}:
+        if src in {"copilot", "codex", "claude"}:
             return src, raw
     return None, sid
 
 
 def get_session(sid: str, source: str = "all") -> Optional[Session]:
     hinted_source, raw_sid = split_public_sid(sid)
-    source = hinted_source or (source if source in {"copilot", "codex"} else "all")
+    source = hinted_source or (source if source in {"copilot", "codex", "claude"} else "all")
 
     if source in {"all", "copilot"}:
         paths = discover_main_files(3650 * 86400)
@@ -1604,6 +2191,17 @@ def get_session(sid: str, source: str = "all") -> Optional[Session]:
             if s:
                 _absorb_codex_children(s, entries, child_map)
                 return s
+        if source == "codex":
+            return None
+
+    if source in {"all", "claude"}:
+        desktop_meta = _claude_desktop_meta()
+        for path in _claude_transcript_glob():
+            stem = os.path.basename(path)[:-6] if path.endswith(".jsonl") else os.path.basename(path)
+            if stem == raw_sid:
+                s = _assemble_claude_session(path, desktop_meta)
+                if s:
+                    return s
     return None
 
 
@@ -1634,7 +2232,7 @@ def session_summary(s: Session) -> dict:
     main_calls, kids = build_series(s)
 
     def with_aic(c):
-        return _aic_for_req(c, s.models_info) if s.cost_available else None
+        return _req_cost_aic(s, c)
 
     return {
         "sid": public_sid(s),
@@ -1695,7 +2293,7 @@ def session_detail(s: Session) -> dict:
             "ttft": c["ttft"], "compact": c["is_compact"],
             "err": c.get("is_error", False), "err_msg": c.get("error", ""),
             "user": any(t["name"] == "user_message" for t in c["tools_before"]),
-            "aic": _aic_for_req(c, s.models_info) if s.cost_available else None,
+            "aic": _req_cost_aic(s, c),
             "reasoning": c.get("reasoning", ""),
             "reasoning_output": c.get("reasoning_output", 0),
             "cum": c.get("cum"), "cum_offset": c.get("cum_offset"),

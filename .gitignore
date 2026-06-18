@@ -4,3 +4,4 @@ __pycache__/
 .DS_Store
 .daily_aic_cache.json
 .daily_codex_cache.json
+.daily_claude_cache.json

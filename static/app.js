@@ -36,7 +36,7 @@ function qtyText(n) { const { num, unit } = qtyParts(n); return num + unit; }
 // in the active unit; fmtCost() wraps it with the unit ($-prefix for USD, " AIC" suffix
 // otherwise); unitLabel() is the standalone symbol for column/section headers.
 let UNIT = "aic"; // "aic" | "usd"
-let SOURCE = "all"; // "all" | "copilot" | "codex"
+let SOURCE = "all"; // "all" | "copilot" | "codex" | "claude"
 let CAL_COST = false;
 let CAL_UNIT = "input tokens";
 function unitLabel() { return UNIT === "usd" ? "$" : "AIC"; }
@@ -304,8 +304,10 @@ function renderChart(payload, opts) {
   // Row 2: output + cache% + available cost (the rest of the totals) followed by turn structure
   // (reqs, subs, compactions, linkage chips). Overflow from row 1 lands here so it all fits.
   let row2parts = [];
-  if (SOURCE === "all" && payload.source_label) {
-    row2parts.push(`<tspan fill="${payload.source === "codex" ? "#56d364" : "#79c0ff"}">${escapeHtml(payload.source_label)}</tspan>`);
+  // Always show the source/model label — even when a global filter is active — so the
+  // chart is self-describing and you don't have to remember/check which source is selected.
+  if (payload.source_label) {
+    row2parts.push(`<tspan fill="${payload.source === "codex" ? "#56d364" : payload.source === "claude" ? "#d2a8ff" : "#79c0ff"}">${escapeHtml(payload.source_label)}</tspan>`);
   }
   row2parts.push(`<tspan fill="#c9d1d9">${qtySvg(payload.total_output)}</tspan> out`);
   row2parts.push(`<tspan fill="${cp >= 70 ? "#58a6ff" : cp >= 30 ? "#d29922" : "#f85149"}">${cp}%</tspan> cache`);
@@ -656,13 +658,24 @@ function computeToolAgg(payload) {
   return { list, totalNew, totalUncached, totalOut: payload.total_output || 0, totalAic, totalFails };
 }
 
+// Single-file path keys, across tools/agents: Copilot (filePath/relativePath),
+// Codex (path), Claude (file_path/notebook_path), plus other common spellings.
+const SINGLE_PATH_KEYS = ["filePath", "file_path", "path", "file", "target_file",
+  "absolute_path", "relativePath", "notebook_path"];
+
+function pickPathKey(o) {
+  for (const k of SINGLE_PATH_KEYS) {
+    if (o[k]) return String(o[k]);
+  }
+  return "";
+}
+
 // Pull a file path out of a tool's args JSON, trying the keys various tools use.
 function toolFilePath(argStr) {
   const s = String(argStr ?? "").trim();
   if (s[0] === "{") {
     try {
-      const o = JSON.parse(s);
-      return o.filePath || o.path || o.file || o.target_file || o.absolute_path || o.relativePath || "";
+      return pickPathKey(JSON.parse(s));
     } catch (_) { /* not json */ }
   }
   return "";
@@ -1095,8 +1108,8 @@ function toolFilePaths(argStr) {
   if (s[0] !== "{") return [];
   let o;
   try { o = JSON.parse(s); } catch (_) { return []; }
-  const single = o.filePath || o.path || o.file || o.target_file || o.absolute_path || o.relativePath;
-  if (single) return [String(single)];
+  const single = pickPathKey(o);
+  if (single) return [single];
   for (const k of ["filePaths", "files"]) {
     if (Array.isArray(o[k])) return o[k].filter(p => typeof p === "string");
   }
@@ -1888,7 +1901,7 @@ function applyUrlState() {
     document.getElementById("sort").value = p.get("sort") || URL_DEFAULTS.sort;
     document.getElementById("limit").value = p.get("limit") || URL_DEFAULTS.limit;
     document.getElementById("min_tokens").value = p.get("min_tokens") || URL_DEFAULTS.min_tokens;
-    SOURCE = ["all", "copilot", "codex"].includes(p.get("source")) ? p.get("source") : URL_DEFAULTS.source;
+    SOURCE = ["all", "copilot", "codex", "claude"].includes(p.get("source")) ? p.get("source") : URL_DEFAULTS.source;
     applySourceControls();
     VIEW = p.get("view") === "table" ? "table" : "charts";
     COMBINE = p.get("combine") !== "0";

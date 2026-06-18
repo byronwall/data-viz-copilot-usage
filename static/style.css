@@ -121,6 +121,7 @@ table.rollup tr.trow:hover .t-thread { color: var(--blue); }
 .source-pill { display: inline-block; margin-right: 6px; padding: 1px 5px; border-radius: 8px; border: 1px solid #444c56; color: #8b949e; font: 10px ui-monospace, monospace; vertical-align: 1px; }
 .source-pill.codex { color: #56d364; border-color: #2f6f45; background: rgba(46, 160, 67, 0.12); }
 .source-pill.copilot { color: #79c0ff; border-color: #1f5da3; background: rgba(88, 166, 255, 0.12); }
+.source-pill.claude { color: #d2a8ff; border-color: #6e40c9; background: rgba(188, 140, 255, 0.12); }
 .t-cache { white-space: nowrap; color: var(--mute); }
 .num.t-cached-sub { color: var(--mute); font-weight: 400; }
 table.rollup td.num { text-align: right; font-variant-numeric: tabular-nums; }
