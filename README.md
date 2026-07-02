@@ -67,8 +67,8 @@ The command starts the local Flask server and opens the viewer in your browser. 
 From a checkout:
 
 ```sh
-git clone https://github.com/byronwall/data-viz-copilot-usage.git
-cd data-viz-copilot-usage
+git clone https://github.com/byronwall/llmly.git
+cd llmly
 uv run app.py
 ```
 

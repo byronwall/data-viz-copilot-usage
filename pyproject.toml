@@ -23,9 +23,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/byronwall/data-viz-copilot-usage"
-Repository = "https://github.com/byronwall/data-viz-copilot-usage"
-Issues = "https://github.com/byronwall/data-viz-copilot-usage/issues"
+Homepage = "https://github.com/byronwall/llmly"
+Repository = "https://github.com/byronwall/llmly"
+Issues = "https://github.com/byronwall/llmly/issues"
 
 [project.scripts]
 llmly = "llmly.app:main"
