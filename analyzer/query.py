@@ -15,19 +15,32 @@ from .series import build_series
 from .text import _reasoning_summary
 from .window import _query_sort_key
 from .copilot import daily_aic, daily_copilot_tokens
-from .codex import daily_codex_tokens
-from .claude import daily_claude_tokens
+from .codex import daily_codex_tokens, daily_codex_usd
+from .claude import daily_claude_tokens, daily_claude_usd
 
 
-def daily_usage(source: str = "copilot") -> dict:
+def daily_usage(source: str = "copilot", unit: str = "aic") -> dict:
     """Daily metric for the selected source.
 
-    Copilot keeps its exact AIC calendar. Codex and mixed-source views use input
-    tokens because Codex rollouts do not currently expose exact AIC/$ cost.
+    Copilot keeps its exact AIC calendar. Codex/Claude can show input tokens or
+    estimated USD where model pricing is available.
     """
     source = source if source in SOURCES else "copilot"
+    unit = unit if unit in {"aic", "usd"} else "aic"
     if source == "copilot":
         return {"days": daily_aic(), "metric": "aic", "unit": "AIC", "cost": True}
+    if unit == "usd":
+        if source == "codex":
+            days = daily_codex_usd()
+        elif source == "claude":
+            days = daily_claude_usd()
+        else:
+            days = daily_codex_usd()
+            for d, v in daily_claude_usd().items():
+                days[d] = days.get(d, 0.0) + v
+            for d, v in daily_aic().items():
+                days[d] = days.get(d, 0.0) + (v / 100)
+        return {"days": days, "metric": "usd", "unit": "$", "cost": False}
     if source == "codex":
         return {"days": daily_codex_tokens(), "metric": "input_tokens", "unit": "input tokens", "cost": False}
     if source == "claude":

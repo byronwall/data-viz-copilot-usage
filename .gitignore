@@ -5,3 +5,4 @@ __pycache__/
 .daily_aic_cache.json
 .daily_codex_cache.json
 .daily_claude_cache.json
+.env

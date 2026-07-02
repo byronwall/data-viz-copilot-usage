@@ -436,9 +436,9 @@ def query_claude_sessions(
     return sessions[:limit]
 
 
-def _daily_claude_for_file(path: str) -> dict[str, float]:
-    """Lightweight {YYYY-MM-DD: input_tokens} for one transcript; deduped by requestId."""
-    days: dict[str, float] = {}
+def _daily_claude_for_file(path: str) -> dict[str, dict[str, float]]:
+    """Lightweight daily input-token and USD totals for one transcript; deduped by requestId."""
+    days: dict[str, dict[str, float]] = {"input_tokens": {}, "usd": {}}
     seen: set[str] = set()
     try:
         with open(path) as f:
@@ -456,7 +456,7 @@ def _daily_claude_for_file(path: str) -> dict[str, float]:
                 rid = d.get("requestId") or msg.get("id")
                 if not rid or rid in seen:
                     continue
-                total_in, _, _ = _claude_request_tokens(usage)
+                total_in, cache_read, out = _claude_request_tokens(usage)
                 if not total_in:
                     continue
                 ts = _parse_iso_ms(d.get("timestamp"))
@@ -464,21 +464,30 @@ def _daily_claude_for_file(path: str) -> dict[str, float]:
                     continue
                 seen.add(rid)
                 day = time.strftime("%Y-%m-%d", time.localtime(ts / 1000))
-                days[day] = days.get(day, 0.0) + total_in
+                days["input_tokens"][day] = days["input_tokens"].get(day, 0.0) + total_in
+                aic = _claude_req_aic({
+                    "model": msg.get("model"),
+                    "input": total_in,
+                    "cached": cache_read,
+                    "cache_creation": int(usage.get("cache_creation_input_tokens", 0) or 0),
+                    "output": out,
+                })
+                if aic:
+                    days["usd"][day] = days["usd"].get(day, 0.0) + (aic / 100)
     except OSError:
         pass
     return days
 
 
-def daily_claude_tokens() -> dict[str, float]:
-    """Total input tokens per local calendar day across Claude transcripts (disk-cached)."""
+def _daily_claude_metric(metric: str) -> dict[str, float]:
+    """Total selected metric per local calendar day across Claude transcripts (disk-cached)."""
     try:
         with open(analyzer.DAILY_CLAUDE_CACHE_PATH) as f:
             cache = json.load(f)
-        if cache.get("version") != 1:
+        if cache.get("version") != 2:
             raise ValueError
     except Exception:
-        cache = {"version": 1, "files": {}}
+        cache = {"version": 2, "files": {}}
     files_cache = cache["files"]
     seen = set()
     dirty = False
@@ -493,11 +502,12 @@ def daily_claude_tokens() -> dict[str, float]:
             continue
         cached = files_cache.get(path)
         if not cached or cached.get("sig") != sig:
-            days = _daily_claude_for_file(path)
-            files_cache[path] = {"sig": sig, "days": days}
+            metrics = _daily_claude_for_file(path)
+            files_cache[path] = {"sig": sig, "metrics": metrics}
             dirty = True
         else:
-            days = cached.get("days", {})
+            metrics = cached.get("metrics", {})
+        days = metrics.get(metric, {}) if isinstance(metrics, dict) else {}
         for d, v in days.items():
             totals[d] = totals.get(d, 0.0) + v
     for path in [p for p in files_cache if p not in seen]:
@@ -512,3 +522,11 @@ def daily_claude_tokens() -> dict[str, float]:
         except OSError:
             pass
     return totals
+
+
+def daily_claude_tokens() -> dict[str, float]:
+    return _daily_claude_metric("input_tokens")
+
+
+def daily_claude_usd() -> dict[str, float]:
+    return _daily_claude_metric("usd")

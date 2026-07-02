@@ -144,6 +144,16 @@ class AnalyzerCodexTests(unittest.TestCase):
         self.assertFalse(payload["cost"])
         self.assertEqual(sum(payload["days"].values()), 250)
 
+    def test_daily_usage_uses_codex_api_usd_when_selected(self):
+        thread = self.add_thread("parent")
+        make_state_db(analyzer.CODEX_BASE, [thread])
+
+        payload = analyzer.daily_usage("codex", "usd")
+        self.assertEqual(payload["metric"], "usd")
+        self.assertEqual(payload["unit"], "$")
+        self.assertFalse(payload["cost"])
+        self.assertAlmostEqual(sum(payload["days"].values()), 0.00161)
+
     def test_flask_source_filter_and_detail_endpoint(self):
         thread = self.add_thread("parent")
         make_state_db(analyzer.CODEX_BASE, [thread])
@@ -157,6 +167,11 @@ class AnalyzerCodexTests(unittest.TestCase):
         detail_resp = client.get(f"/api/session/{sid}")
         self.assertEqual(detail_resp.status_code, 200)
         self.assertEqual(detail_resp.json["source"], "codex")
+
+        daily_resp = client.get("/api/daily_usage?source=codex&unit=usd")
+        self.assertEqual(daily_resp.status_code, 200)
+        self.assertEqual(daily_resp.json["metric"], "usd")
+        self.assertAlmostEqual(sum(daily_resp.json["days"].values()), 0.00161)
 
     def test_codex_uses_fresh_sqlite_state_db_when_root_db_is_stale(self):
         old_thread = self.add_thread("old", first_user="old work", updated_at_ms=1780721421582)
@@ -247,6 +262,14 @@ class AnalyzerClaudeTests(unittest.TestCase):
         self.assertEqual(payload["metric"], "input_tokens")
         self.assertFalse(payload["cost"])
         self.assertEqual(sum(payload["days"].values()), 425)
+
+    def test_daily_usage_uses_claude_usd_when_selected(self):
+        self.add_session("sess1")
+        payload = analyzer.daily_usage("claude", "usd")
+        self.assertEqual(payload["metric"], "usd")
+        self.assertEqual(payload["unit"], "$")
+        self.assertFalse(payload["cost"])
+        self.assertAlmostEqual(sum(payload["days"].values()), 0.00234125)
 
     def test_sidechain_requests_fold_into_child_group(self):
         rows = claude_rows()

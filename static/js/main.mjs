@@ -231,16 +231,17 @@ export function applyUnit() {
   if (calBtn) calBtn.textContent = `📅 ${calendarButtonLabel()}`;
   updateBanner();
   if (LAST_SESSIONS.length) applyView();
-  if (!calPop.hidden) renderCalendar();
+  if (S._calLoaded) loadCalendar();
   if (S.MODAL_SID) openModal(S.MODAL_SID);
 }
 
 export function applySourceControls() {
   S.CAL_COST = hasCostMetric();
-  S.CAL_UNIT = S.CAL_COST ? "AIC" : "input tokens";
+  S.CAL_METRIC = S.CAL_COST ? "aic" : (S.UNIT === "usd" ? "usd" : "input_tokens");
+  S.CAL_UNIT = S.CAL_METRIC === "aic" ? "AIC" : (S.CAL_METRIC === "usd" ? "$" : "input tokens");
   document.querySelectorAll(".source-btn").forEach(b => b.classList.toggle("active", b.dataset.source === S.SOURCE));
   const unitToggle = document.getElementById("unitToggle");
-  if (unitToggle) unitToggle.hidden = !hasCostMetric();
+  if (unitToggle) unitToggle.hidden = false;
   const aicSort = document.querySelector('#sort option[value="aic"]');
   if (aicSort) aicSort.textContent = hasCostMetric() ? "by AIC" : "by usage metric";
   const calBtn = document.getElementById("calTrigger");

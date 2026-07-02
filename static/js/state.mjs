@@ -6,6 +6,7 @@ export const S = {
   SOURCE: "all",
   CAL_COST: false,
   CAL_UNIT: "input tokens",
+  CAL_METRIC: "input_tokens",
   MODAL_SID: null,
   DVIEW: "turns",
   DTAB: "overview",

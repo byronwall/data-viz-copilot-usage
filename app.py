@@ -76,13 +76,15 @@ def api_sessions():
 
 @app.route("/api/daily_usage")
 def api_daily_usage():
-    """Daily selected metric for a source: Copilot AIC, Codex/all input tokens."""
+    """Daily selected metric for a source and display unit."""
     source = request.args.get("source", "copilot")
     source = source if source in analyzer.SOURCES else "copilot"
+    unit = request.args.get("unit", "aic")
     t0 = time.time()
-    payload = analyzer.daily_usage(source)
+    payload = analyzer.daily_usage(source, unit)
     payload["took_ms"] = int((time.time() - t0) * 1000)
     payload["source"] = source
+    payload["selected_unit"] = unit
     return jsonify(payload)
 
 

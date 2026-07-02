@@ -50,10 +50,36 @@ export function fmtAic(n) {
   return (v / 1e6).toFixed(2) + "M";
 }
 export function fmtCost(n) { return S.UNIT === "usd" ? "$" + fmtAic(n) : fmtAic(n) + " AIC"; }
+export function fmtUsd(n) {
+  const v = Number(n || 0);
+  if (v === 0) return "$0.00";
+  if (Math.abs(v) < 0.01) return "$" + v.toFixed(4);
+  if (Math.abs(v) < 1000) return "$" + v.toFixed(2);
+  return "$" + (v / 1000).toFixed(2) + "k";
+}
 export function hasCostMetric() { return S.SOURCE === "copilot"; }
-export function metricFmt(n) { return S.CAL_COST ? fmtCost(n) : `${qtyText(n)} input`; }
-export function metricCell(n) { return S.CAL_COST ? fmtAicCell(n) : qtyText(n); }
-export function calendarButtonLabel() { return S.CAL_COST ? unitLabel() : "input"; }
+export function fmtUsdCell(n) {
+  const v = Number(n || 0);
+  if (v >= 1000) return "$" + (v / 1000).toFixed(1) + "k";
+  if (v >= 1) return "$" + Math.round(v);
+  if (v >= 0.01) return "$" + v.toFixed(2);
+  return "$" + v.toFixed(3);
+}
+export function metricFmt(n) {
+  if (S.CAL_METRIC === "aic") return fmtCost(n);
+  if (S.CAL_METRIC === "usd") return fmtUsd(n);
+  return `${qtyText(n)} input`;
+}
+export function metricCell(n) {
+  if (S.CAL_METRIC === "aic") return fmtAicCell(n);
+  if (S.CAL_METRIC === "usd") return fmtUsdCell(n);
+  return qtyText(n);
+}
+export function calendarButtonLabel() {
+  if (S.CAL_METRIC === "aic") return unitLabel();
+  if (S.CAL_METRIC === "usd") return "$";
+  return "input";
+}
 export function costColumnLabel() { return hasCostMetric() ? unitLabel() : "cost"; }
 export function pad(x) { return String(x).padStart(2, "0"); }
 export function hms(ms) {
@@ -183,4 +209,3 @@ export function localMaxT(payload) {
   for (const k of payload.kids || []) for (const c of k.calls) if (c.t > mx) mx = c.t;
   return Math.max(60000, Math.ceil(mx / 30000) * 30000);
 }
-

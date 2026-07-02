@@ -5,7 +5,7 @@ Codex layout on disk (under CODEX_HOME / ~/.codex):
   sessions/<yyyy>/<mm>/<dd>/rollout-*.jsonl
 """
 from __future__ import annotations
-import os, json, glob, time, sqlite3, copy
+import os, json, glob, time, sqlite3, copy, re
 from typing import Optional
 
 import analyzer
@@ -17,6 +17,43 @@ from .window import resolve_window
 # ---------- Cache ----------
 
 _CODEX_SESSION_CACHE: dict[str, tuple[float, Optional[Session]]] = {}
+
+_CODEX_API_PRICES_USD_PER_1M = {
+    "gpt-5.5": {"input": 5.00, "cache": 0.50, "output": 30.00},
+    "gpt-5.5-pro": {"input": 30.00, "cache": None, "output": 180.00},
+    "gpt-5.4": {"input": 2.50, "cache": 0.25, "output": 15.00},
+    "gpt-5.4-mini": {"input": 0.75, "cache": 0.075, "output": 4.50},
+    "gpt-5.4-nano": {"input": 0.20, "cache": 0.02, "output": 1.25},
+    "gpt-5.4-pro": {"input": 30.00, "cache": None, "output": 180.00},
+    "gpt-5.3-codex": {"input": 1.75, "cache": 0.175, "output": 14.00},
+}
+_CODEX_API_PRICE_ALIASES = {
+    "gpt-5-codex": "gpt-5.3-codex",
+    "codex-mini-latest": "gpt-5.3-codex",
+}
+
+
+def _codex_api_price_key(model_id: str | None) -> str | None:
+    if not model_id:
+        return None
+    m = str(model_id).lower().strip()
+    if m in _CODEX_API_PRICE_ALIASES:
+        m = _CODEX_API_PRICE_ALIASES[m]
+    if m in _CODEX_API_PRICES_USD_PER_1M:
+        return m
+    undated = re.sub(r"-20\d{2}-\d{2}-\d{2}$", "", m)
+    if undated in _CODEX_API_PRICE_ALIASES:
+        undated = _CODEX_API_PRICE_ALIASES[undated]
+    return undated if undated in _CODEX_API_PRICES_USD_PER_1M else None
+
+
+def _codex_api_usd(model: str | None, input_tokens: float, cached_tokens: float, output_tokens: float) -> Optional[float]:
+    key = _codex_api_price_key(model)
+    if not key:
+        return None
+    p = _CODEX_API_PRICES_USD_PER_1M[key]
+    cache_rate = p["cache"] if p.get("cache") is not None else p["input"]
+    return (max(0, input_tokens - cached_tokens) * p["input"] + cached_tokens * cache_rate + output_tokens * p["output"]) / 1_000_000
 
 
 def _candidate_codex_state_dbs() -> list[str]:
@@ -518,8 +555,8 @@ def _codex_file_signature(path: str) -> list:
         return []
 
 
-def _daily_codex_for_entry(ent: dict) -> dict[str, float]:
-    """Lightweight {YYYY-MM-DD: input_tokens}; avoids loading tool outputs."""
+def _daily_codex_for_entry(ent: dict) -> dict[str, dict[str, float]]:
+    """Lightweight daily input-token and estimated-USD totals; avoids tool outputs."""
     if _codex_is_internal(
         ent.get("source") or "",
         ent.get("model") or "",
@@ -529,7 +566,8 @@ def _daily_codex_for_entry(ent: dict) -> dict[str, float]:
     ):
         return {}
     path = ent.get("rollout_path") or ""
-    days: dict[str, float] = {}
+    days: dict[str, dict[str, float]] = {"input_tokens": {}, "usd": {}}
+    current_model = ent.get("model") or "?"
     try:
         with open(path) as f:
             for line in f:
@@ -538,6 +576,9 @@ def _daily_codex_for_entry(ent: dict) -> dict[str, float]:
                 except Exception:
                     continue
                 p = d.get("payload") if isinstance(d.get("payload"), dict) else {}
+                if d.get("type") == "turn_context":
+                    current_model = p.get("model") or current_model
+                    continue
                 if d.get("type") != "event_msg" or p.get("type") != "token_count":
                     continue
                 info = p.get("info") if isinstance(p.get("info"), dict) else {}
@@ -549,21 +590,29 @@ def _daily_codex_for_entry(ent: dict) -> dict[str, float]:
                 if not ts:
                     continue
                 day = time.strftime("%Y-%m-%d", time.localtime(ts / 1000))
-                days[day] = days.get(day, 0.0) + inp
+                days["input_tokens"][day] = days["input_tokens"].get(day, 0.0) + inp
+                usd = _codex_api_usd(
+                    current_model,
+                    inp,
+                    usage.get("cached_input_tokens", 0) or 0,
+                    usage.get("output_tokens", 0) or 0,
+                )
+                if usd is not None:
+                    days["usd"][day] = days["usd"].get(day, 0.0) + usd
     except OSError:
         pass
     return days
 
 
-def daily_codex_tokens() -> dict[str, float]:
+def _daily_codex_metric(metric: str) -> dict[str, float]:
     entries, _ = _load_codex_index()
     try:
         with open(analyzer.DAILY_CODEX_CACHE_PATH) as f:
             cache = json.load(f)
-        if cache.get("version") != 1:
+        if cache.get("version") != 2:
             raise ValueError
     except Exception:
-        cache = {"version": 1, "files": {}}
+        cache = {"version": 2, "files": {}}
     files_cache = cache["files"]
     seen = set()
     dirty = False
@@ -578,11 +627,12 @@ def daily_codex_tokens() -> dict[str, float]:
             continue
         cached = files_cache.get(path)
         if not cached or cached.get("sig") != sig:
-            days = _daily_codex_for_entry(ent)
-            files_cache[path] = {"sig": sig, "days": days}
+            metrics = _daily_codex_for_entry(ent)
+            files_cache[path] = {"sig": sig, "metrics": metrics}
             dirty = True
         else:
-            days = cached.get("days", {})
+            metrics = cached.get("metrics", {})
+        days = metrics.get(metric, {}) if isinstance(metrics, dict) else {}
         for d, v in days.items():
             totals[d] = totals.get(d, 0.0) + v
     for path in [p for p in files_cache if p not in seen]:
@@ -597,3 +647,11 @@ def daily_codex_tokens() -> dict[str, float]:
         except OSError:
             pass
     return totals
+
+
+def daily_codex_tokens() -> dict[str, float]:
+    return _daily_codex_metric("input_tokens")
+
+
+def daily_codex_usd() -> dict[str, float]:
+    return _daily_codex_metric("usd")

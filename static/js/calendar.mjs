@@ -88,11 +88,12 @@ export function renderCalendar() {
 
 export async function loadCalendar() {
   try {
-    const resp = await fetch(`/api/daily_usage?source=${encodeURIComponent(S.SOURCE)}`);
+    const resp = await fetch(`/api/daily_usage?source=${encodeURIComponent(S.SOURCE)}&unit=${encodeURIComponent(S.UNIT)}`);
     const data = await resp.json();
     S.CAL_DAYS = data.days || {};
     S.CAL_COST = data.cost !== false;
     S.CAL_UNIT = data.unit || (S.CAL_COST ? "AIC" : "input tokens");
+    S.CAL_METRIC = data.metric || (S.CAL_COST ? "aic" : "input_tokens");
     calTrigger.textContent = `📅 ${calendarButtonLabel()}`;
     // default to the most recent year that has data (usually current year)
     const years = Object.keys(S.CAL_DAYS).map(k => Number(k.slice(0, 4)));
@@ -145,4 +146,3 @@ window.addEventListener("resize", () => {
   clearTimeout(_calResizeT);
   _calResizeT = setTimeout(() => { if (!calPop.hidden) renderCalendar(); }, 150);
 });
-
