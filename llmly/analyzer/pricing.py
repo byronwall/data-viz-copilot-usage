@@ -9,7 +9,7 @@ from __future__ import annotations
 import os, json, glob, time
 from typing import Optional, TYPE_CHECKING
 
-import analyzer
+from llmly import analyzer
 from .constants import BACKGROUND_NAMES
 
 if TYPE_CHECKING:

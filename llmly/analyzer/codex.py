@@ -8,7 +8,7 @@ from __future__ import annotations
 import os, json, glob, time, sqlite3, copy, re
 from typing import Optional
 
-import analyzer
+from llmly import analyzer
 from .constants import COMPACT_NAMES
 from .models import Session
 from .text import _short, _short_json, _result_text, _parse_iso_ms

@@ -30,18 +30,18 @@ titles/effort and degrades cleanly when Desktop is absent.
 ## What changed for Codex
 
 Codex support was implemented by adding a second backend adapter inside
-`analyzer.py` and then teaching the API and frontend to pass a `source` filter
+`llmly/analyzer/` and then teaching the API and frontend to pass a `source` filter
 through the existing views.
 
 The major code areas are:
 
-- `analyzer.py`: source discovery, Codex rollout parsing, child folding, source
+- `llmly/analyzer/`: source discovery, Codex rollout parsing, child folding, source
   dispatch, public IDs, summaries, details, and daily usage aggregation.
 - `app.py`: `source` query parameters, `/api/daily_usage`, and source-aware detail
   lookup.
-- `static/app.js`: source toggle, URL state, calendar metric switching, source
+- `llmly/static/js/`: source toggle, URL state, calendar metric switching, source
   pills in mixed views, and cost hiding when unavailable.
-- `templates/index.html`: data-source buttons.
+- `llmly/templates/index.html`: data-source buttons.
 - `tests/test_analyzer.py`: fixtures for Codex token counts, tool attribution,
   child folding, source filtering, daily usage, and state DB selection.
 - `.gitignore`: daily Codex token cache.
@@ -49,7 +49,7 @@ The major code areas are:
 ## What changed for Claude
 
 Claude support followed the same recipe as Codex: a third backend adapter in
-`analyzer.py`, then a `source=claude` value threaded through the existing API and
+`llmly/analyzer/`, then a `source=claude` value threaded through the existing API and
 frontend. The adapter is simpler than Codex because there is no index DB — each
 `projects/<encoded-cwd>/<sessionId>.jsonl` transcript is one session.
 
@@ -473,8 +473,8 @@ depending on live local agent history in tests.
 After adding or changing a source adapter, run:
 
 ```sh
-node --check static/app.js
-uv run python -m py_compile analyzer.py app.py tests/test_analyzer.py
+node --check llmly/static/js/app.mjs
+uv run python -m py_compile app.py analyzer/__init__.py llmly/app.py llmly/analyzer/*.py tests/test_analyzer.py
 uv run pytest
 ```
 

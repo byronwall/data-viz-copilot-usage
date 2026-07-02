@@ -1,4 +1,4 @@
-# data-viz-copilot-usage
+# llmly
 
 Interactive web viewer for VS Code Copilot, Codex, and Claude coding-session token usage. It reads local Copilot debug logs, Codex rollout logs, and Claude transcripts, then turns each session into a small-multiple chart of cumulative token use over time, with a drill-in modal showing every LLM call and the tool invocations that fed it.
 
@@ -56,21 +56,41 @@ The 📅 calendar is a GitHub-style year heatmap. In Copilot-only mode it shows 
 
 Requires [uv](https://github.com/astral-sh/uv).
 
+From PyPI:
+
+```sh
+uvx llmly
+```
+
+The command starts the local Flask server and opens the viewer in your browser. If port 5057 is busy, `llmly` automatically tries the next available port.
+
+From a checkout:
+
 ```sh
 git clone https://github.com/byronwall/data-viz-copilot-usage.git
 cd data-viz-copilot-usage
 uv run app.py
 ```
 
-Then open <http://localhost:5057>.
+Then open <http://localhost:5057> if the browser does not open automatically.
 
 CLI flags:
 
 ```sh
-uv run app.py --port 8000 --host 0.0.0.0 --debug
+uvx llmly --port 8000 --host 0.0.0.0 --debug
+uvx llmly --no-open
 ```
 
 uv will create `.venv/` and install Flask on the first run; subsequent runs are instant.
+
+## Publish
+
+The publish script loads `.env`, increments the patch version, runs checks, builds the wheel/sdist, and publishes. Use `PYPI_TOKEN` for production PyPI and `TEST_PYPI_TOKEN` for TestPyPI:
+
+```sh
+./publish-llmly.sh test
+./publish-llmly.sh prod
+```
 
 ## Test
 
@@ -105,7 +125,7 @@ The tests live in `tests/` and use hermetic fixtures for Codex state instead of 
 
 ## How it works
 
-`analyzer.py` discovers Copilot `main.jsonl` files via the workspaceStorage glob. For each session it parses the foreground log plus any sibling `*.jsonl` files (those are child sessions — `runSubagent-*` and `title-*`). For Codex, it uses `state_5.sqlite` as the thread index and parses rollout JSONL `token_count` events for per-turn usage. For Claude, it globs `projects/*/*.jsonl` and parses each `assistant` record's `message.usage`, deduping the multiple lines that share one `requestId`. Files are cached in-memory keyed by mtime where useful, and daily Codex/Claude token totals are disk-cached by file mtime/size. The frontend renders SVG directly in the browser from the JSON payload so filtering is responsive.
+`llmly/analyzer/` discovers Copilot `main.jsonl` files via the workspaceStorage glob. For each session it parses the foreground log plus any sibling `*.jsonl` files (those are child sessions — `runSubagent-*` and `title-*`). For Codex, it uses `state_5.sqlite` as the thread index and parses rollout JSONL `token_count` events for per-turn usage. For Claude, it globs `projects/*/*.jsonl` and parses each `assistant` record's `message.usage`, deduping the multiple lines that share one `requestId`. Files are cached in-memory keyed by mtime where useful, and daily Codex/Claude token totals are disk-cached by file mtime/size. The frontend renders SVG directly in the browser from the JSON payload so filtering is responsive.
 
 For the implementation write-up and the repeatable process for adding more agent sources, see [docs/agent-source-integration-guide.md](docs/agent-source-integration-guide.md).
 

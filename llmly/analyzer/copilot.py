@@ -13,7 +13,7 @@ they appear in the main list as just another session (no parent linkage in the l
 from __future__ import annotations
 import os, json, glob, time
 
-import analyzer
+from llmly import analyzer
 from .constants import COMPACT_NAMES, FIND_PREFIX
 from .models import Session
 from .pricing import _aic_for_req, _load_models_json

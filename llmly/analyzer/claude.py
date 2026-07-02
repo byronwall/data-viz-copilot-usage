@@ -20,7 +20,7 @@ from __future__ import annotations
 import os, json, glob, re, time, copy
 from typing import Optional
 
-import analyzer
+from llmly import analyzer
 from .constants import COMPACT_NAMES
 from .codex import _codex_file_signature
 from .models import Session

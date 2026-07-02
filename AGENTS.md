@@ -4,18 +4,21 @@ Operational guidance for agents working in this repo.
 
 ## Project Shape
 
-- This is a deliberately small Flask app, not an installable Python package. Keep `[tool.uv].package = false`.
-- Runtime Python code lives in `app.py` and `analyzer.py`.
-- Browser code is plain JavaScript in `static/app.js`; CSS is in `static/style.css`; templates are in `templates/`.
+- This is a deliberately small Flask app packaged for PyPI as `llmly`.
+- Runtime Python code lives in `llmly/app.py` and `llmly/analyzer/`; root-level `app.py` and `analyzer/` are compatibility shims.
+- Browser code is plain JavaScript modules in `llmly/static/js/`; CSS is in `llmly/static/style.css`; templates are in `llmly/templates/`.
 - Avoid adding build systems, bundlers, task runners, or framework migrations unless the user explicitly asks for them.
 
 ## Standard Commands
 
 - Run the app: `uv run app.py`
 - Run on a specific port: `uv run app.py --port 5057`
+- Run the packaged CLI locally: `uv run llmly`
 - Run unit tests: `uv run pytest`
-- Check Python syntax when parser/app code changes: `uv run python -m py_compile analyzer.py app.py tests/test_analyzer.py`
-- Check frontend syntax when `static/app.js` changes: `node --check static/app.js`
+- Build PyPI artifacts: `uv build`
+- Publish and patch-bump version: `./publish-llmly.sh` (`./publish-llmly.sh test` for TestPyPI)
+- Check Python syntax when parser/app code changes: `uv run python -m py_compile app.py analyzer/__init__.py llmly/app.py llmly/analyzer/*.py tests/test_analyzer.py`
+- Check frontend syntax when frontend modules change: `node --check llmly/static/js/app.mjs`
 
 Use `uv` for Python dependency management. Add test-only dependencies with `uv add --dev <package>` so `pyproject.toml` and `uv.lock` stay in sync.
 
@@ -29,7 +32,7 @@ Use `uv` for Python dependency management. Add test-only dependencies with `uv a
 ## Frontend Conventions
 
 - Keep the frontend dependency-free unless a real build step becomes necessary.
-- Shared detail rendering lives in `static/app.js`; update the turns, by-tool, and by-file views together when changing tool metadata behavior.
+- Shared detail rendering lives in `llmly/static/js/`; update the turns, by-tool, and by-file views together when changing tool metadata behavior.
 - Tool failure display is heuristic. Treat successful terminal statuses such as `ok`, `success`, and Codex `completed` as non-failures, and only add failure markers that are anchored enough to avoid flagging ordinary file contents or test output.
 
 ## Documentation
