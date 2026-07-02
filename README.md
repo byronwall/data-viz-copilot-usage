@@ -79,7 +79,11 @@ CLI flags:
 ```sh
 uvx llmly --port 8000 --host 0.0.0.0 --debug
 uvx llmly --no-open
+uvx llmly --diagnose-logs
+uvx llmly --copilot-storage "$HOME/Library/Application Support/Code - Insiders/User/workspaceStorage"
 ```
+
+If Copilot sessions do not appear, run `uvx llmly --diagnose-logs` to print the VS Code-family log locations that were checked and how many Copilot `main.jsonl` files were found. Once you identify the right `workspaceStorage` directory, pass it with `--copilot-storage <path>` or set `COPILOT_USAGE_STORAGE=<path>`.
 
 uv will create `.venv/` and install Flask on the first run; subsequent runs are instant.
 
@@ -109,7 +113,7 @@ The tests live in `tests/` and use hermetic fixtures for Codex state instead of 
 - **Each card**: a small line chart. y = cumulative input tokens (shared scale across all cards in the result set so the heaviest hitter fills the frame). x = wall-clock time from first activity (per-card scale). Solid blue = the foreground `panel/editAgent` chat. Dashed colored lines = sub-agents (`runSubagent-*`). Orange diamonds = compaction events (`summarizeConversationHistory*`, `summarizeVirtualTools`). Dot size encodes per-turn input tokens. Dot color encodes cache hit on that turn (blue ≥70% / amber 30–70% / red <30%).
 - **Click a card** → fullscreen modal with the chart on the left and a per-turn detail table on the right. Hover any dot to highlight (and scroll to) the matching row, and vice versa. Each row shows debugName, reasoning level, input/cached/output, cache-hit bar, and the tools that fired before that turn.
 - **`charts` / `table` toggle** (below the controls): switch the result set between the small-multiples grid and a tabular rollup — one row per thread (session), with columns for model, reasoning level, request count, input/cached/cache%/output tokens, available cost, and duration. Click a column header to sort; click a row to open the same detail modal as a card. The active view persists in the URL (`?view=table`).
-- **Reasoning level** is the requested effort, *not* a token count. Copilot reads it from each request's `requestOptions`; Codex reads it from the rollout `turn_context.effort`; Claude reads it from the Claude Desktop session metadata when present (transcripts don't log it per request). Codex reasoning-output token counts are included in detail payloads, but not shown as a separate default table column.
+- **Reasoning level** is the requested effort, _not_ a token count. Copilot reads it from each request's `requestOptions`; Codex reads it from the rollout `turn_context.effort`; Claude reads it from the Claude Desktop session metadata when present (transcripts don't log it per request). Codex reasoning-output token counts are included in detail payloads, but not shown as a separate default table column.
 - **Codex subagents** are folded into parent Codex threads by default using `thread_spawn_edges`; guardian/internal review threads are hidden from the default Codex view.
 - **Claude sub-agents** (Task-tool sidechains in the same transcript) are folded into the parent session as a single `sub-agents` child line. Claude `input` is the full prompt (`input_tokens + cache_read + cache_creation`); `cached` is the cache-read subset, so cache-hit rates and uncached totals follow the same convention as the other sources.
 

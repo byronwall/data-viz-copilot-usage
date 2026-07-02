@@ -7,7 +7,12 @@ Run:
 Then open http://localhost:5057
 """
 from __future__ import annotations
-import argparse, socket, threading, time, webbrowser
+import argparse
+import socket
+import threading
+import time
+import webbrowser
+import os
 from flask import Flask, jsonify, request, render_template, abort
 
 from . import analyzer
@@ -155,13 +160,45 @@ def _open_browser(url: str) -> None:
     webbrowser.open(url, new=2)
 
 
+def _print_copilot_log_diagnostics() -> None:
+    diag = analyzer.diagnose_copilot_logs()
+    print("Copilot log diagnostics")
+    print(f"COPILOT_USAGE_STORAGE={diag['env'] or '(unset)'}")
+    print(f"Effective workspaceStorage={diag['effective_base']}")
+    print("")
+    found = False
+    for root in diag["roots"]:
+        if root["main_jsonl"]:
+            found = True
+        print(f"[{root['label']}] {root['path']}")
+        print(f"  exists: {root['exists']}")
+        print(f"  workspace dirs: {root['workspace_dirs']}")
+        print(f"  Copilot debug-log roots: {root['debug_log_dirs']}")
+        print(f"  Copilot session dirs: {root['session_dirs']}")
+        print(f"  main.jsonl files: {root['main_jsonl']}")
+        print(f"  total jsonl files: {root['jsonl_files']}")
+        for item in root["recent_main"]:
+            print(f"    recent: {item['path']} ({item['size']} bytes)")
+        print("")
+    if not found:
+        print("No Copilot main.jsonl files were found in the checked locations.")
+        print("If you use VS Code Insiders, VSCodium, Cursor, Windsurf, or a portable profile, set COPILOT_USAGE_STORAGE to that profile's User/workspaceStorage directory.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=None, help="Port to bind. Defaults to the first open port from 5057.")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--no-open", action="store_true", help="Start the server without opening a browser tab.")
+    ap.add_argument("--copilot-storage", help="Path to VS Code's User/workspaceStorage directory for Copilot logs.")
+    ap.add_argument("--diagnose-logs", action="store_true", help="Print Copilot log discovery diagnostics and exit.")
     args = ap.parse_args()
+    if args.copilot_storage:
+        analyzer.BASE = os.path.expanduser(args.copilot_storage)
+    if args.diagnose_logs:
+        _print_copilot_log_diagnostics()
+        return
     port = _choose_port(args.host, args.port)
     url = _browser_url(args.host, port)
     print(f"Serving AI usage viewer on {url}")

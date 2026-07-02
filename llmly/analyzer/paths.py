@@ -4,7 +4,39 @@ These are pure functions with no package state; the package ``__init__`` calls t
 once to seed the module-level base-path constants (which tests may then rebind).
 """
 from __future__ import annotations
-import os, sys
+import os
+import sys
+
+
+def candidate_workspace_storage_paths() -> list[tuple[str, str]]:
+    """Likely VS Code-family workspaceStorage roots for Copilot debug logs."""
+    out: list[tuple[str, str]] = []
+    env = os.environ.get("COPILOT_USAGE_STORAGE")
+    if env:
+        out.append((os.path.expanduser(env), "COPILOT_USAGE_STORAGE"))
+    if sys.platform == "darwin":
+        root = os.path.expanduser("~/Library/Application Support")
+        apps = ["Code", "Code - Insiders", "VSCodium", "Cursor", "Windsurf"]
+        for app in apps:
+            out.append((os.path.join(root, app, "User", "workspaceStorage"), app))
+    elif sys.platform == "win32":
+        root = os.environ.get("APPDATA", os.path.expanduser("~/AppData/Roaming"))
+        apps = ["Code", "Code - Insiders", "VSCodium", "Cursor", "Windsurf"]
+        for app in apps:
+            out.append((os.path.join(root, app, "User", "workspaceStorage"), app))
+    else:  # linux / other unix
+        root = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+        apps = ["Code", "Code - Insiders", "VSCodium", "Cursor", "Windsurf"]
+        for app in apps:
+            out.append((os.path.join(root, app, "User", "workspaceStorage"), app))
+    seen = set()
+    unique = []
+    for path, label in out:
+        if path in seen:
+            continue
+        seen.add(path)
+        unique.append((path, label))
+    return unique
 
 
 def _default_workspace_storage() -> str:

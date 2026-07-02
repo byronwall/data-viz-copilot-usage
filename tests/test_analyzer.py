@@ -1,6 +1,9 @@
 import json
+import contextlib
+import io
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 
@@ -36,6 +39,90 @@ def rollout_rows(thread_id, first_user="do thing", source="vscode", model="gpt-5
             "input_tokens": 150, "cached_input_tokens": 100, "output_tokens": 20,
             "reasoning_output_tokens": 4, "total_tokens": 170}}}),
     ]
+
+
+class AnalyzerCopilotDiagnosticTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.old_base = analyzer.BASE
+        analyzer.BASE = os.path.join(self.tmp.name, "workspaceStorage")
+        self.addCleanup(self.restore_globals)
+
+    def restore_globals(self):
+        analyzer.BASE = self.old_base
+
+    def add_copilot_session(self, sid="session-1"):
+        path = os.path.join(
+            analyzer.BASE,
+            "workspace-1",
+            "GitHub.copilot-chat",
+            "debug-logs",
+            sid,
+            "main.jsonl",
+        )
+        write_jsonl(path, [{"ts": 1781474400000, "type": "user_message", "attrs": {"content": "hello"}}])
+        return path
+
+    def test_copilot_diagnostics_counts_main_jsonl_under_effective_base(self):
+        main_path = self.add_copilot_session()
+
+        diag = analyzer.diagnose_copilot_logs()
+        effective = diag["roots"][0]
+
+        self.assertEqual(effective["label"], "effective BASE")
+        self.assertEqual(effective["path"], analyzer.BASE)
+        self.assertTrue(effective["exists"])
+        self.assertEqual(effective["workspace_dirs"], 1)
+        self.assertEqual(effective["debug_log_dirs"], 1)
+        self.assertEqual(effective["session_dirs"], 1)
+        self.assertEqual(effective["main_jsonl"], 1)
+        self.assertEqual(effective["jsonl_files"], 1)
+        self.assertEqual(effective["recent_main"][0]["path"], main_path)
+
+    def test_diagnose_logs_cli_prints_and_exits_before_server_start(self):
+        self.add_copilot_session()
+
+        out = io.StringIO()
+        old_argv = sys.argv
+        try:
+            sys.argv = ["llmly", "--diagnose-logs"]
+            with contextlib.redirect_stdout(out):
+                app.main()
+        finally:
+            sys.argv = old_argv
+
+        text = out.getvalue()
+        self.assertIn("Copilot log diagnostics", text)
+        self.assertIn("Effective workspaceStorage=", text)
+        self.assertIn("main.jsonl files: 1", text)
+        self.assertNotIn("Serving AI usage viewer", text)
+
+    def test_cli_accepts_copilot_storage_override_for_diagnostics(self):
+        override_base = os.path.join(self.tmp.name, "overrideStorage")
+        main_path = os.path.join(
+            override_base,
+            "workspace-2",
+            "GitHub.copilot-chat",
+            "debug-logs",
+            "session-2",
+            "main.jsonl",
+        )
+        write_jsonl(main_path, [{"ts": 1781474400000, "type": "user_message", "attrs": {"content": "hello"}}])
+
+        out = io.StringIO()
+        old_argv = sys.argv
+        try:
+            sys.argv = ["llmly", "--copilot-storage", override_base, "--diagnose-logs"]
+            with contextlib.redirect_stdout(out):
+                app.main()
+        finally:
+            sys.argv = old_argv
+
+        text = out.getvalue()
+        self.assertEqual(analyzer.BASE, override_base)
+        self.assertIn(f"Effective workspaceStorage={override_base}", text)
+        self.assertIn("main.jsonl files: 1", text)
 
 
 def make_state_db(codex_home, threads, edges=()):

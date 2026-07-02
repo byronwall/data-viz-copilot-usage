@@ -79,6 +79,7 @@ from .copilot import (
     daily_aic,
     daily_copilot_tokens,
     discover_main_files,
+    diagnose_copilot_logs,
     assemble_session,
     _extract_search_queries,
     link_search_parents,

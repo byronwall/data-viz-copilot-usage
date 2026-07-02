@@ -11,11 +11,15 @@ with "Find relevant code snippets for:" are standalone subagent-search sessions 
 they appear in the main list as just another session (no parent linkage in the log files).
 """
 from __future__ import annotations
-import os, json, glob, time
+import os
+import json
+import glob
+import time
 
 from llmly import analyzer
 from .constants import COMPACT_NAMES, FIND_PREFIX
 from .models import Session
+from .paths import candidate_workspace_storage_paths
 from .pricing import _aic_for_req, _load_models_json
 from .text import _short, _clip, _result_text
 from .window import resolve_window
@@ -249,6 +253,46 @@ def discover_main_files(
         except OSError:
             continue
     return out
+
+
+def diagnose_copilot_logs() -> dict:
+    """Inspect likely VS Code Copilot log locations without parsing sessions."""
+    candidates = [(analyzer.BASE, "effective BASE")]
+    candidates.extend(candidate_workspace_storage_paths())
+    seen = set()
+    roots = []
+    for root, label in candidates:
+        if root in seen:
+            continue
+        seen.add(root)
+        workspace_pat = os.path.join(root, "*")
+        debug_pat = os.path.join(root, "*", "GitHub.copilot-chat", "debug-logs")
+        session_pat = os.path.join(root, "*", "GitHub.copilot-chat", "debug-logs", "*")
+        main_pat = os.path.join(root, "*", "GitHub.copilot-chat", "debug-logs", "*", "main.jsonl")
+        jsonl_pat = os.path.join(root, "*", "GitHub.copilot-chat", "debug-logs", "*", "*.jsonl")
+        main_files = glob.glob(main_pat)
+        readable_main = []
+        for fp in main_files:
+            try:
+                readable_main.append({"path": fp, "size": os.path.getsize(fp), "mtime": os.path.getmtime(fp)})
+            except OSError:
+                continue
+        roots.append({
+            "label": label,
+            "path": root,
+            "exists": os.path.isdir(root),
+            "workspace_dirs": len([p for p in glob.glob(workspace_pat) if os.path.isdir(p)]),
+            "debug_log_dirs": len([p for p in glob.glob(debug_pat) if os.path.isdir(p)]),
+            "session_dirs": len([p for p in glob.glob(session_pat) if os.path.isdir(p)]),
+            "main_jsonl": len(main_files),
+            "jsonl_files": len(glob.glob(jsonl_pat)),
+            "recent_main": sorted(readable_main, key=lambda item: item["mtime"], reverse=True)[:5],
+        })
+    return {
+        "env": os.environ.get("COPILOT_USAGE_STORAGE"),
+        "effective_base": analyzer.BASE,
+        "roots": roots,
+    }
 
 
 # ---------- Session assembly ----------
